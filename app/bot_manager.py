@@ -40,6 +40,8 @@ class BotHandler:
         self.media_group_tasks = {}
         # 单条消息延迟任务：{message_id: asyncio.Task}
         self.single_message_tasks = {}
+        # 消息缓存：{(chat_id, message_id): message} 用于处理编辑
+        self.message_cache = {}
 
         # 注册消息处理器
         self.register_handlers()
@@ -54,6 +56,10 @@ class BotHandler:
         @self.dp.message(F.chat.type.in_({"group", "supergroup"}))
         async def handle_group_message(message: types.Message):
             await self.handle_group_msg(message)
+
+        @self.dp.edited_message(F.chat.type.in_({"group", "supergroup"}))
+        async def handle_edited_message(message: types.Message):
+            await self.handle_message_edit(message)
 
     async def handle_start(self, message: types.Message):
         """处理 /start 命令"""
@@ -100,6 +106,8 @@ class BotHandler:
 
             # 添加到媒体组缓存
             self.media_groups[media_group_id].append(message)
+            # 缓存消息用于处理编辑
+            self.message_cache[(chat_id, message.message_id)] = message
 
             # 取消之前的处理任务
             if media_group_id in self.media_group_tasks:
@@ -114,6 +122,9 @@ class BotHandler:
             # 单条消息，延迟转发
             message_id = message.message_id
 
+            # 缓存消息用于处理编辑
+            self.message_cache[(chat_id, message_id)] = message
+
             # 取消之前的处理任务（如果有）
             if message_id in self.single_message_tasks:
                 self.single_message_tasks[message_id].cancel()
@@ -123,6 +134,37 @@ class BotHandler:
                 self.process_single_message(message, chat_id, chat_title)
             )
             self.single_message_tasks[message_id] = task
+
+    async def handle_message_edit(self, message: types.Message):
+        """处理消息编辑"""
+        if not message.from_user:
+            return
+
+        chat_id = message.chat.id
+        message_id = message.message_id
+        cache_key = (chat_id, message_id)
+
+        logger.info(
+            f"[Bot {self.bot_id}] 消息被编辑: chat_id={chat_id}, message_id={message_id}"
+        )
+
+        # 如果消息在缓存中，更新它
+        if cache_key in self.message_cache:
+            logger.info(f"[Bot {self.bot_id}] 更新缓存中的消息内容")
+            self.message_cache[cache_key] = message
+
+            # 如果是媒体组中的消息，也更新媒体组缓存
+            if message.media_group_id:
+                media_group_id = message.media_group_id
+                if media_group_id in self.media_groups:
+                    # 找到并替换该消息
+                    for i, msg in enumerate(self.media_groups[media_group_id]):
+                        if msg.message_id == message_id:
+                            self.media_groups[media_group_id][i] = message
+                            logger.info(f"[Bot {self.bot_id}] 更新媒体组缓存中的消息")
+                            break
+        else:
+            logger.info(f"[Bot {self.bot_id}] 消息不在缓存中，可能已经转发或不需要转发")
 
     async def ensure_group_exists(self, chat_id: int, chat_title: str):
         """确保群组在数据库中存在（立即执行，不延迟）"""
@@ -154,9 +196,24 @@ class BotHandler:
         """处理单条消息（延迟 2 分钟后执行）"""
         await asyncio.sleep(20.0)
 
-        await self.forward_messages_to_users([message], chat_id, chat_title)
+        # 检查消息是否仍在缓存中
+        cache_key = (chat_id, message.message_id)
+        if cache_key not in self.message_cache:
+            logger.info(f"[Bot {self.bot_id}] 消息 {message.message_id} 不在缓存中，可能已被删除，取消转发")
+            if message.message_id in self.single_message_tasks:
+                del self.single_message_tasks[message.message_id]
+            return
+
+        # 从缓存中获取最新的消息（可能已被编辑）
+        latest_message = self.message_cache[cache_key]
+        logger.info(f"[Bot {self.bot_id}] 准备转发消息 {message.message_id}（可能已被编辑）")
+
+        # 转发消息（使用最新版本）
+        await self.forward_messages_to_users([latest_message], chat_id, chat_title)
 
         # 清理缓存
+        if cache_key in self.message_cache:
+            del self.message_cache[cache_key]
         if message.message_id in self.single_message_tasks:
             del self.single_message_tasks[message.message_id]
 
@@ -166,11 +223,30 @@ class BotHandler:
 
         messages = self.media_groups.get(media_group_id, [])
         if messages:
+            # 从缓存中获取最新版本的消息（可能已被编辑）
+            updated_messages = []
+            for msg in messages:
+                cache_key = (chat_id, msg.message_id)
+                if cache_key in self.message_cache:
+                    # 使用缓存中的最新版本
+                    updated_messages.append(self.message_cache[cache_key])
+                else:
+                    # 如果不在缓存中，说明可能被删除了
+                    logger.warning(f"[Bot {self.bot_id}] 媒体组中的消息 {msg.message_id} 不在缓存中，可能已被删除")
+
+            if not updated_messages:
+                logger.info(f"[Bot {self.bot_id}] 媒体组 {media_group_id} 中所有消息都被删除，取消转发")
+                # 清理缓存
+                del self.media_groups[media_group_id]
+                if media_group_id in self.media_group_tasks:
+                    del self.media_group_tasks[media_group_id]
+                return
+
             logger.info(
-                f"[Bot {self.bot_id}] Processing media group {media_group_id} with {len(messages)} items"
+                f"[Bot {self.bot_id}] Processing media group {media_group_id} with {len(updated_messages)} items"
             )
             # 打印每条消息的类型用于调试
-            for i, msg in enumerate(messages):
+            for i, msg in enumerate(updated_messages):
                 msg_type = "unknown"
                 if msg.photo:
                     msg_type = "photo"
@@ -184,12 +260,20 @@ class BotHandler:
                     msg_type = "text"
                 logger.info(f"  Message {i}: type={msg_type}, caption={msg.caption or 'None'}")
 
-            await self.forward_messages_to_users(messages, chat_id, chat_title)
+            # 转发消息（使用最新版本）
+            await self.forward_messages_to_users(updated_messages, chat_id, chat_title)
 
             # 清理缓存
+            for msg in messages:
+                cache_key = (chat_id, msg.message_id)
+                if cache_key in self.message_cache:
+                    del self.message_cache[cache_key]
+
             del self.media_groups[media_group_id]
             if media_group_id in self.media_group_tasks:
                 del self.media_group_tasks[media_group_id]
+        else:
+            logger.warning(f"[Bot {self.bot_id}] 媒体组 {media_group_id} 为空")
 
     async def forward_messages_to_users(
         self, messages: list[types.Message], chat_id: int, chat_title: str
@@ -262,6 +346,9 @@ class BotHandler:
 
             logger.info(f"[Bot {self.bot_id}] Forwarding to {len(active_relays)} users, is_media_group={is_media_group}")
 
+            # 追踪是否实际发送了消息
+            actually_sent = False
+
             for relay in active_relays:
                 # Increment Index
                 relay.current_index += 1
@@ -275,6 +362,7 @@ class BotHandler:
                     suffix = f"#{idx}"
 
                 target_user_id = relay.target_user.user_id
+                sent_to_user = False  # 追踪是否给这个用户发送了消息
 
                 try:
                     if is_media_group:
@@ -324,14 +412,15 @@ class BotHandler:
                                     )
                                 )
                             else:
-                                # 记录不支持的消息类型，但不发送错误消息
-                                logger.warning(f"Unsupported message type in media group for user {target_user_id}")
+                                # 跳过不支持的消息类型
+                                logger.warning(f"[Bot {self.bot_id}] 跳过不支持的媒体类型 for user {target_user_id}")
 
                         if media_list:
                             await self.bot.send_media_group(target_user_id, media_list)
                             logger.info(f"✅ Sent media group with {len(media_list)} items to {target_user_id} ({suffix})")
+                            sent_to_user = True
                         else:
-                            logger.error(f"Media group is empty for {target_user_id}, skipping")
+                            logger.warning(f"[Bot {self.bot_id}] 媒体组中所有消息都是不支持的类型，跳过用户 {target_user_id}")
                     else:
                         # 单条消息
                         message = messages[0]
@@ -340,56 +429,65 @@ class BotHandler:
 
                         if message.text:
                             await self.bot.send_message(target_user_id, final_text)
+                            sent_to_user = True
                         elif message.photo:
                             await self.bot.send_photo(
                                 target_user_id,
                                 message.photo[-1].file_id,
                                 caption=final_text,
                             )
+                            sent_to_user = True
                         elif message.video:
                             await self.bot.send_video(
                                 target_user_id, message.video.file_id, caption=final_text
                             )
+                            sent_to_user = True
                         elif message.document:
                             await self.bot.send_document(
                                 target_user_id, message.document.file_id, caption=final_text
                             )
+                            sent_to_user = True
                         elif message.voice:
                             await self.bot.send_voice(
                                 target_user_id, message.voice.file_id, caption=final_text
                             )
+                            sent_to_user = True
                         elif message.audio:
                             await self.bot.send_audio(
                                 target_user_id, message.audio.file_id, caption=final_text
                             )
+                            sent_to_user = True
                         else:
-                            await self.bot.send_message(
-                                target_user_id, f"[不支持的媒体类型]     {suffix}"
-                            )
+                            # 跳过不支持的媒体类型，不发送任何消息
+                            logger.warning(f"[Bot {self.bot_id}] 跳过不支持的媒体类型 for user {target_user_id}")
 
-                    # Log Stats
-                    log = MessageLog(
-                        user_tag=relay.tag or "",
-                        recipient_id=target_user_id,
-                        assigned_index=idx,
-                        original_sender_name=first_message.from_user.full_name,
-                    )
-                    session.add(log)
+                    # 只有实际发送了消息才记录日志
+                    if sent_to_user:
+                        actually_sent = True
+                        log = MessageLog(
+                            user_tag=relay.tag or "",
+                            recipient_id=target_user_id,
+                            assigned_index=idx,
+                            original_sender_name=first_message.from_user.full_name,
+                        )
+                        session.add(log)
 
                 except Exception as e:
                     logger.error(f"Failed to send to {target_user_id}: {e}")
 
-            # 转发成功后，给原消息点赞（标记已转发）
-            if active_relays:
+            # 转发成功后，给原消息点赞（只有实际发送了消息才点赞）
+            if actually_sent:
                 try:
                     await self.bot.set_message_reaction(
                         chat_id=chat_id,
                         message_id=first_message.message_id,
                         reaction=[{"type": "emoji", "emoji": "👍"}]
                     )
-                    logger.info(f"Added reaction to message {first_message.message_id} in group {chat_title}")
+                    logger.info(f"✅ [Bot {self.bot_id}] 成功点赞消息 {first_message.message_id} 在群组 {chat_title}")
                 except Exception as e:
-                    logger.warning(f"Failed to add reaction: {e}")
+                    logger.error(f"❌ [Bot {self.bot_id}] 点赞失败: {e}")
+            else:
+                logger.warning(f"⚠️ [Bot {self.bot_id}] 没有发送任何消息，跳过点赞")
 
             await session.commit()
 
