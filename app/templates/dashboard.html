@@ -9,6 +9,7 @@
     <table class="w-full text-left border-collapse">
         <thead>
             <tr>
+                <th class="border-b p-2">所属 Bot</th>
                 <th class="border-b p-2">群组 ID</th>
                 <th class="border-b p-2">群组名称</th>
                 <th class="border-b p-2">转发用户数</th>
@@ -19,10 +20,15 @@
         <tbody>
             {% for group in groups %}
             <tr>
+                <td class="p-2 border-b">
+                    <span class="inline-block bg-blue-100 text-blue-800 text-xs px-2 py-1 rounded">
+                        {{ group.bot_instance.name }}
+                    </span>
+                </td>
                 <td class="p-2 border-b">{{ group.group_id }}</td>
                 <td class="p-2 border-b">{{ group.title }}</td>
                 <td class="p-2 border-b">
-                    <span class="text-blue-600">{{ group.target_users|length }} 人</span>
+                    <span class="text-blue-600">{{ group.user_relays|length }} 人</span>
                 </td>
                 <td class="p-2 border-b">
                     {% if group.is_active %}

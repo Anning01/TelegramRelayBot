@@ -24,21 +24,21 @@
 </div>
 
 <div class="bg-white rounded shadow p-6">
-    <h3 class="font-bold text-gray-700 mb-4">选择转发目标用户</h3>
-    <p class="text-gray-600 text-sm mb-4">勾选要接收此群组消息的用户。只有已启用的用户才会实际接收消息。</p>
+    <h3 class="font-bold text-gray-700 mb-4">选择转发目标用户并设置标记</h3>
+    <p class="text-gray-600 text-sm mb-4">勾选要接收此群组消息的用户，并为每个用户设置独立的标记（如 A、B、客服1 等）。标记会出现在转发消息的后缀中。</p>
 
     <form method="post">
         <div class="space-y-3">
             {% for user in all_users %}
-            <label class="flex items-center p-3 border rounded hover:bg-gray-50 cursor-pointer {% if not user.is_active %}opacity-60{% endif %}">
+            <div class="flex items-center p-3 border rounded hover:bg-gray-50 {% if not user.is_active %}opacity-60{% endif %}">
                 <input
                     type="checkbox"
-                    name="user_ids"
-                    value="{{ user.user_id }}"
-                    {% if user.user_id in selected_user_ids %}checked{% endif %}
+                    name="user_{{ user.user_id }}"
+                    id="user_{{ user.user_id }}"
+                    {% if user.user_id in user_configs %}checked{% endif %}
                     class="mr-3 h-5 w-5"
                 >
-                <div class="flex-1">
+                <label for="user_{{ user.user_id }}" class="flex-1 cursor-pointer">
                     <div class="font-medium">{{ user.name }}</div>
                     <div class="text-sm text-gray-500">
                         ID: {{ user.user_id }}
@@ -46,8 +46,18 @@
                         <span class="text-orange-500 ml-2">（用户未启用）</span>
                         {% endif %}
                     </div>
+                </label>
+                <div class="ml-4">
+                    <input
+                        type="text"
+                        name="tag_{{ user.user_id }}"
+                        placeholder="标记（选填）"
+                        value="{{ user_configs.get(user.user_id, '') or '' }}"
+                        maxlength="10"
+                        class="px-3 py-1 border rounded text-sm w-32"
+                    >
                 </div>
-            </label>
+            </div>
             {% endfor %}
         </div>
 

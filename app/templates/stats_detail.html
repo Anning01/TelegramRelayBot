@@ -2,7 +2,7 @@
 {% block content %}
 <div class="flex items-center mb-6">
     <a href="/stats" class="text-blue-600 hover:underline mr-4">← 返回</a>
-    <h1 class="text-2xl font-bold">标记 <span class="text-blue-600">[{{ tag }}]</span> 的统计数据</h1>
+    <h1 class="text-2xl font-bold">标记 <span class="text-blue-600">{{ tag if tag else '(未设置)' }}</span> 的统计数据</h1>
 </div>
 
 <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">

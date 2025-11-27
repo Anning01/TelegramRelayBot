@@ -3,6 +3,10 @@
 <h1 class="text-2xl font-bold mb-6">用户列表</h1>
 
 <div class="bg-white rounded shadow p-6">
+    <p class="text-sm text-gray-600 mb-4">
+        💡 提示：用户的标记现在在「群组配置」中设置，每个群组可以为同一用户设置不同的标记。
+    </p>
+
     {% if not users %}
     <p class="text-gray-500">暂无用户。请让用户向机器人私聊发送 /start 以注册。</p>
     {% else %}
@@ -11,7 +15,6 @@
             <tr>
                 <th class="border-b p-2">用户 ID</th>
                 <th class="border-b p-2">姓名</th>
-                <th class="border-b p-2">当前消息序号</th>
                 <th class="border-b p-2">状态</th>
                 <th class="border-b p-2">操作</th>
             </tr>
@@ -21,7 +24,6 @@
             <tr>
                 <td class="p-2 border-b">{{ user.user_id }}</td>
                 <td class="p-2 border-b">{{ user.name }}</td>
-                <td class="p-2 border-b">{{ user.current_index }}</td>
                 <td class="p-2 border-b">
                     {% if user.is_active %}
                     <span class="text-green-600 font-semibold">已启用</span>

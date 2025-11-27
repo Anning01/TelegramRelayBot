@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+{% block content %}
+<h1 class="text-2xl font-bold mb-6">Bot 管理</h1>
+
+<div class="bg-white rounded shadow p-6 mb-6">
+    <div class="bg-blue-50 border-l-4 border-blue-500 p-4 mb-4">
+        <p class="text-sm text-gray-700">
+            <strong>💡 配置多个 Bot：</strong>
+            在 <code>.env</code> 文件中配置多个 token：<br>
+            <code>BOT_TOKEN=第一个bot的token</code><br>
+            <code>BOT_TOKEN_1=第二个bot的token</code><br>
+            <code>BOT_TOKEN_2=第三个bot的token</code><br>
+            重启服务后会自动导入。
+        </p>
+    </div>
+</div>
+
+<div class="bg-white rounded shadow p-6">
+    {% if not bots %}
+    <p class="text-gray-500">暂无 Bot。请在 .env 文件中配置 BOT_TOKEN 并重启服务。</p>
+    {% else %}
+    <table class="w-full text-left border-collapse">
+        <thead>
+            <tr>
+                <th class="border-b p-2">ID</th>
+                <th class="border-b p-2">名称</th>
+                <th class="border-b p-2">用户名</th>
+                <th class="border-b p-2">Token (部分)</th>
+                <th class="border-b p-2">群组数量</th>
+                <th class="border-b p-2">状态</th>
+                <th class="border-b p-2">操作</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for bot in bots %}
+            <tr>
+                <td class="p-2 border-b">{{ bot.id }}</td>
+                <td class="p-2 border-b font-semibold">{{ bot.name }}</td>
+                <td class="p-2 border-b">
+                    {% if bot.username %}
+                    <span class="text-blue-600">@{{ bot.username }}</span>
+                    {% else %}
+                    <span class="text-gray-400">-</span>
+                    {% endif %}
+                </td>
+                <td class="p-2 border-b">
+                    <code class="text-xs bg-gray-100 px-2 py-1 rounded">
+                        {{ bot.token[:15] }}...{{ bot.token[-4:] }}
+                    </code>
+                </td>
+                <td class="p-2 border-b">
+                    <span class="text-blue-600">{{ bot.relay_groups|length }} 个群组</span>
+                </td>
+                <td class="p-2 border-b">
+                    {% if bot.is_active %}
+                    <span class="text-green-600 font-semibold">● 运行中</span>
+                    {% else %}
+                    <span class="text-gray-400 font-semibold">○ 已停止</span>
+                    {% endif %}
+                </td>
+                <td class="p-2 border-b">
+                    <form action="/toggle_bot/{{ bot.id }}" method="post">
+                        <button type="submit" class="px-3 py-1 rounded text-white {% if bot.is_active %}bg-red-500 hover:bg-red-600{% else %}bg-green-500 hover:bg-green-600{% endif %}">
+                            {% if bot.is_active %}停止{% else %}启动{% endif %}
+                        </button>
+                    </form>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% endif %}
+</div>
+
+<div class="mt-6 bg-yellow-50 border-l-4 border-yellow-500 p-4">
+    <p class="text-sm text-gray-700">
+        <strong>⚠️ 注意：</strong>
+        <ul class="list-disc list-inside mt-2">
+            <li>停止 Bot 后，该 Bot 下的所有群组将停止转发</li>
+            <li>删除 Bot 需要先删除其所有群组（暂未实现删除功能）</li>
+            <li>修改 Token 后需要重启服务</li>
+        </ul>
+    </p>
+</div>
+
+{% endblock %}
