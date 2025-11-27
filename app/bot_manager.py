@@ -194,7 +194,7 @@ class BotHandler:
 
     async def process_single_message(self, message: types.Message, chat_id: int, chat_title: str):
         """处理单条消息（延迟 2 分钟后执行）"""
-        await asyncio.sleep(20.0)
+        await asyncio.sleep(120.0)
 
         # 检查消息是否仍在缓存中
         cache_key = (chat_id, message.message_id)
@@ -237,7 +237,7 @@ class BotHandler:
 
     async def process_media_group(self, media_group_id: str, chat_id: int, chat_title: str):
         """处理媒体组（延迟 2 分钟后执行）"""
-        await asyncio.sleep(20.0)
+        await asyncio.sleep(120.0)
 
         messages = self.media_groups.get(media_group_id, [])
         if not messages:
