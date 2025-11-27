@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block content %}
+<h1 class="text-2xl font-bold mb-6">群组列表</h1>
+
+<div class="bg-white rounded shadow p-6">
+    {% if not groups %}
+    <p class="text-gray-500">暂无群组。请将机器人拉入群组并发送消息以注册。</p>
+    {% else %}
+    <table class="w-full text-left border-collapse">
+        <thead>
+            <tr>
+                <th class="border-b p-2">群组 ID</th>
+                <th class="border-b p-2">群组名称</th>
+                <th class="border-b p-2">转发用户数</th>
+                <th class="border-b p-2">状态</th>
+                <th class="border-b p-2">操作</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for group in groups %}
+            <tr>
+                <td class="p-2 border-b">{{ group.group_id }}</td>
+                <td class="p-2 border-b">{{ group.title }}</td>
+                <td class="p-2 border-b">
+                    <span class="text-blue-600">{{ group.target_users|length }} 人</span>
+                </td>
+                <td class="p-2 border-b">
+                    {% if group.is_active %}
+                    <span class="text-green-600 font-semibold">已启用</span>
+                    {% else %}
+                    <span class="text-red-600 font-semibold">已暂停</span>
+                    {% endif %}
+                </td>
+                <td class="p-2 border-b">
+                    <div class="flex gap-2">
+                        <a href="/group/{{ group.group_id }}/config" class="px-3 py-1 rounded text-white bg-blue-500 hover:bg-blue-600">
+                            配置用户
+                        </a>
+                        <form action="/toggle_group/{{ group.group_id }}" method="post">
+                            <button type="submit" class="px-3 py-1 rounded text-white {% if group.is_active %}bg-red-500 hover:bg-red-600{% else %}bg-green-500 hover:bg-green-600{% endif %}">
+                                {% if group.is_active %}禁用{% else %}启用{% endif %}
+                            </button>
+                        </form>
+                    </div>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% endif %}
+</div>
+{% endblock %}

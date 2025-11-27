@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="flex items-center mb-6">
+    <a href="/" class="text-blue-600 hover:underline mr-4">← 返回群组列表</a>
+    <h1 class="text-2xl font-bold">配置群组：{{ group.title }}</h1>
+</div>
+
+<div class="bg-white rounded shadow p-6 mb-6">
+    <h3 class="font-bold text-gray-700 mb-4">群组信息</h3>
+    <div class="grid grid-cols-2 gap-4">
+        <div>
+            <span class="text-gray-500">群组 ID：</span>
+            <span class="font-mono">{{ group.group_id }}</span>
+        </div>
+        <div>
+            <span class="text-gray-500">状态：</span>
+            {% if group.is_active %}
+            <span class="text-green-600 font-semibold">已启用</span>
+            {% else %}
+            <span class="text-red-600 font-semibold">已禁用</span>
+            {% endif %}
+        </div>
+    </div>
+</div>
+
+<div class="bg-white rounded shadow p-6">
+    <h3 class="font-bold text-gray-700 mb-4">选择转发目标用户</h3>
+    <p class="text-gray-600 text-sm mb-4">勾选要接收此群组消息的用户。只有已启用的用户才会实际接收消息。</p>
+
+    <form method="post">
+        <div class="space-y-3">
+            {% for user in all_users %}
+            <label class="flex items-center p-3 border rounded hover:bg-gray-50 cursor-pointer {% if not user.is_active %}opacity-60{% endif %}">
+                <input
+                    type="checkbox"
+                    name="user_ids"
+                    value="{{ user.user_id }}"
+                    {% if user.user_id in selected_user_ids %}checked{% endif %}
+                    class="mr-3 h-5 w-5"
+                >
+                <div class="flex-1">
+                    <div class="font-medium">{{ user.name }}</div>
+                    <div class="text-sm text-gray-500">
+                        ID: {{ user.user_id }}
+                        {% if not user.is_active %}
+                        <span class="text-orange-500 ml-2">（用户未启用）</span>
+                        {% endif %}
+                    </div>
+                </div>
+            </label>
+            {% endfor %}
+        </div>
+
+        {% if not all_users %}
+        <p class="text-gray-500">暂无用户。请让用户向机器人私聊发送 /start 以注册。</p>
+        {% endif %}
+
+        <div class="mt-6 flex gap-3">
+            <button type="submit" class="px-6 py-2 bg-blue-600 text-white rounded hover:bg-blue-700">
+                保存配置
+            </button>
+            <a href="/" class="px-6 py-2 bg-gray-300 text-gray-700 rounded hover:bg-gray-400">
+                取消
+            </a>
+        </div>
+    </form>
+</div>
+{% endblock %}
