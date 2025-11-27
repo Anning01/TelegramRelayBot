@@ -89,6 +89,14 @@ class BotHandler:
         if not message.from_user:
             return
 
+        # 只处理媒体消息（图片、视频、文档、音频、语音）
+        # 忽略纯文本消息和系统消息（如用户加入/离开群组）
+        if not (message.photo or message.video or message.document or message.audio or message.voice):
+            logger.debug(
+                f"[Bot {self.bot_id}] 跳过非媒体消息: {message.text or '[System Message]'}"
+            )
+            return
+
         chat_id = message.chat.id
         chat_title = message.chat.title or "Unknown Group"
 
@@ -194,7 +202,7 @@ class BotHandler:
 
     async def process_single_message(self, message: types.Message, chat_id: int, chat_title: str):
         """处理单条消息（延迟 2 分钟后执行）"""
-        await asyncio.sleep(120.0)
+        await asyncio.sleep(20.0)
 
         # 检查消息是否仍在缓存中
         cache_key = (chat_id, message.message_id)
@@ -237,7 +245,7 @@ class BotHandler:
 
     async def process_media_group(self, media_group_id: str, chat_id: int, chat_title: str):
         """处理媒体组（延迟 2 分钟后执行）"""
-        await asyncio.sleep(120.0)
+        await asyncio.sleep(20.0)
 
         messages = self.media_groups.get(media_group_id, [])
         if not messages:
