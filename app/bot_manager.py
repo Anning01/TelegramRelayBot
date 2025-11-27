@@ -206,9 +206,27 @@ class BotHandler:
 
         # 从缓存中获取最新的消息（可能已被编辑）
         latest_message = self.message_cache[cache_key]
-        logger.info(f"[Bot {self.bot_id}] 准备转发消息 {message.message_id}（可能已被编辑）")
+
+        # 先尝试点赞来验证消息是否还存在
+        try:
+            await self.bot.set_message_reaction(
+                chat_id=chat_id,
+                message_id=message.message_id,
+                reaction=[{"type": "emoji", "emoji": "👍"}]
+            )
+            logger.info(f"✅ [Bot {self.bot_id}] 消息 {message.message_id} 存在，准备转发")
+        except Exception as e:
+            # 点赞失败，说明消息已被删除
+            logger.info(f"⚠️ [Bot {self.bot_id}] 消息 {message.message_id} 已被删除（点赞失败: {e}），取消转发")
+            # 清理缓存
+            if cache_key in self.message_cache:
+                del self.message_cache[cache_key]
+            if message.message_id in self.single_message_tasks:
+                del self.single_message_tasks[message.message_id]
+            return
 
         # 转发消息（使用最新版本）
+        logger.info(f"[Bot {self.bot_id}] 开始转发消息 {message.message_id}（可能已被编辑）")
         await self.forward_messages_to_users([latest_message], chat_id, chat_title)
 
         # 清理缓存
@@ -222,58 +240,92 @@ class BotHandler:
         await asyncio.sleep(20.0)
 
         messages = self.media_groups.get(media_group_id, [])
-        if messages:
-            # 从缓存中获取最新版本的消息（可能已被编辑）
-            updated_messages = []
-            for msg in messages:
-                cache_key = (chat_id, msg.message_id)
-                if cache_key in self.message_cache:
-                    # 使用缓存中的最新版本
-                    updated_messages.append(self.message_cache[cache_key])
-                else:
-                    # 如果不在缓存中，说明可能被删除了
-                    logger.warning(f"[Bot {self.bot_id}] 媒体组中的消息 {msg.message_id} 不在缓存中，可能已被删除")
+        if not messages:
+            logger.warning(f"[Bot {self.bot_id}] 媒体组 {media_group_id} 为空")
+            return
 
-            if not updated_messages:
-                logger.info(f"[Bot {self.bot_id}] 媒体组 {media_group_id} 中所有消息都被删除，取消转发")
-                # 清理缓存
-                del self.media_groups[media_group_id]
-                if media_group_id in self.media_group_tasks:
-                    del self.media_group_tasks[media_group_id]
-                return
+        # 找到第一个有 caption 的消息用于点赞
+        message_to_react = None
+        for msg in messages:
+            if msg.caption:
+                message_to_react = msg
+                break
 
-            logger.info(
-                f"[Bot {self.bot_id}] Processing media group {media_group_id} with {len(updated_messages)} items"
+        # 如果没有找到有 caption 的消息，使用第一条消息
+        if not message_to_react:
+            message_to_react = messages[0]
+
+        # 先尝试点赞来验证消息是否还存在
+        try:
+            await self.bot.set_message_reaction(
+                chat_id=chat_id,
+                message_id=message_to_react.message_id,
+                reaction=[{"type": "emoji", "emoji": "👍"}]
             )
-            # 打印每条消息的类型用于调试
-            for i, msg in enumerate(updated_messages):
-                msg_type = "unknown"
-                if msg.photo:
-                    msg_type = "photo"
-                elif msg.video:
-                    msg_type = "video"
-                elif msg.document:
-                    msg_type = "document"
-                elif msg.audio:
-                    msg_type = "audio"
-                elif msg.text:
-                    msg_type = "text"
-                logger.info(f"  Message {i}: type={msg_type}, caption={msg.caption or 'None'}")
-
-            # 转发消息（使用最新版本）
-            await self.forward_messages_to_users(updated_messages, chat_id, chat_title)
-
+            logger.info(f"✅ [Bot {self.bot_id}] 媒体组 {media_group_id} 存在，准备转发（点赞消息ID: {message_to_react.message_id}）")
+        except Exception as e:
+            # 点赞失败，说明消息已被删除
+            logger.info(f"⚠️ [Bot {self.bot_id}] 媒体组 {media_group_id} 已被删除（点赞失败: {e}），取消转发")
             # 清理缓存
             for msg in messages:
                 cache_key = (chat_id, msg.message_id)
                 if cache_key in self.message_cache:
                     del self.message_cache[cache_key]
-
             del self.media_groups[media_group_id]
             if media_group_id in self.media_group_tasks:
                 del self.media_group_tasks[media_group_id]
-        else:
-            logger.warning(f"[Bot {self.bot_id}] 媒体组 {media_group_id} 为空")
+            return
+
+        # 从缓存中获取最新版本的消息（可能已被编辑）
+        updated_messages = []
+        for msg in messages:
+            cache_key = (chat_id, msg.message_id)
+            if cache_key in self.message_cache:
+                # 使用缓存中的最新版本
+                updated_messages.append(self.message_cache[cache_key])
+            else:
+                # 如果不在缓存中，说明可能被删除了
+                logger.warning(f"[Bot {self.bot_id}] 媒体组中的消息 {msg.message_id} 不在缓存中")
+
+        if not updated_messages:
+            logger.info(f"[Bot {self.bot_id}] 媒体组 {media_group_id} 中所有消息都被删除，取消转发")
+            # 清理缓存
+            del self.media_groups[media_group_id]
+            if media_group_id in self.media_group_tasks:
+                del self.media_group_tasks[media_group_id]
+            return
+
+        logger.info(
+            f"[Bot {self.bot_id}] Processing media group {media_group_id} with {len(updated_messages)} items"
+        )
+        # 打印每条消息的类型用于调试
+        for i, msg in enumerate(updated_messages):
+            msg_type = "unknown"
+            if msg.photo:
+                msg_type = "photo"
+            elif msg.video:
+                msg_type = "video"
+            elif msg.document:
+                msg_type = "document"
+            elif msg.audio:
+                msg_type = "audio"
+            elif msg.text:
+                msg_type = "text"
+            logger.info(f"  Message {i}: type={msg_type}, caption={msg.caption or 'None'}")
+
+        # 转发消息（使用最新版本）
+        logger.info(f"[Bot {self.bot_id}] 开始转发媒体组 {media_group_id}")
+        await self.forward_messages_to_users(updated_messages, chat_id, chat_title)
+
+        # 清理缓存
+        for msg in messages:
+            cache_key = (chat_id, msg.message_id)
+            if cache_key in self.message_cache:
+                del self.message_cache[cache_key]
+
+        del self.media_groups[media_group_id]
+        if media_group_id in self.media_group_tasks:
+            del self.media_group_tasks[media_group_id]
 
     async def forward_messages_to_users(
         self, messages: list[types.Message], chat_id: int, chat_title: str
@@ -368,15 +420,27 @@ class BotHandler:
                     if is_media_group:
                         # 媒体组：发送多个媒体
                         media_list = []
+
+                        # 找到第一个有实际内容的 caption
+                        first_caption_index = -1
                         for i, msg in enumerate(messages):
-                            # 每条消息都保留原始caption，只在第一条后面添加标记
-                            original_caption = msg.caption or ""
-                            if i == 0:
-                                # 第一条消息：添加标记和序号
-                                caption = f"{original_caption}     {suffix}" if original_caption else suffix
+                            if msg.caption:
+                                first_caption_index = i
+                                break
+
+                        for i, msg in enumerate(messages):
+                            # 保留原始caption，只在第一个有内容的caption后面添加标记
+                            original_caption = msg.caption
+
+                            if i == first_caption_index and original_caption:
+                                # 第一个有内容的caption：添加标记和序号
+                                caption = f"{original_caption}     {suffix}"
+                            elif original_caption:
+                                # 其他有内容的caption：保留原始
+                                caption = original_caption
                             else:
-                                # 其他消息：保留原始caption（如果有）
-                                caption = original_caption if original_caption else None
+                                # caption为None：跳过（设为None）
+                                caption = None
 
                             # 只处理支持的媒体类型
                             if msg.photo:
@@ -475,19 +539,12 @@ class BotHandler:
                 except Exception as e:
                     logger.error(f"Failed to send to {target_user_id}: {e}")
 
-            # 转发成功后，给原消息点赞（只有实际发送了消息才点赞）
+            # 消息已在 process_single_message/process_media_group 中点赞过了
+            # 不需要重复点赞
             if actually_sent:
-                try:
-                    await self.bot.set_message_reaction(
-                        chat_id=chat_id,
-                        message_id=first_message.message_id,
-                        reaction=[{"type": "emoji", "emoji": "👍"}]
-                    )
-                    logger.info(f"✅ [Bot {self.bot_id}] 成功点赞消息 {first_message.message_id} 在群组 {chat_title}")
-                except Exception as e:
-                    logger.error(f"❌ [Bot {self.bot_id}] 点赞失败: {e}")
+                logger.info(f"✅ [Bot {self.bot_id}] 成功转发消息到 {len(active_relays)} 个用户")
             else:
-                logger.warning(f"⚠️ [Bot {self.bot_id}] 没有发送任何消息，跳过点赞")
+                logger.warning(f"⚠️ [Bot {self.bot_id}] 没有发送任何消息（可能都是不支持的媒体类型）")
 
             await session.commit()
 
