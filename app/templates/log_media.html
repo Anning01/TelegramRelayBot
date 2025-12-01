@@ -1,0 +1,94 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="max-w-6xl mx-auto">
+    <div class="mb-6">
+        <a href="/logs" class="text-blue-500 hover:underline">&larr; 返回日志列表</a>
+    </div>
+
+    <h1 class="text-2xl font-bold mb-6">消息媒体文件</h1>
+
+    <div class="bg-white rounded shadow p-6 mb-6">
+        <div class="grid grid-cols-2 gap-4 text-sm">
+            <div>
+                <span class="font-semibold">时间:</span> {{ log.timestamp.strftime('%Y-%m-%d %H:%M:%S') }}
+            </div>
+            <div>
+                <span class="font-semibold">方向:</span>
+                {% if log.direction == 'outbound' %}
+                <span class="text-blue-600">发给用户</span>
+                {% else %}
+                <span class="text-green-600">用户回复</span>
+                {% endif %}
+            </div>
+            <div>
+                <span class="font-semibold">Tag:</span> {{ log.user_tag or '-' }}
+            </div>
+            <div>
+                <span class="font-semibold">序号:</span> #{{ log.assigned_index }}
+            </div>
+            <div class="col-span-2">
+                <span class="font-semibold">内容:</span> {{ log.content or '-' }}
+            </div>
+        </div>
+    </div>
+
+    <h2 class="text-xl font-bold mb-4">媒体文件 ({{ media_files|length }})</h2>
+
+    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+        {% for media in media_files %}
+        <div class="bg-white rounded shadow overflow-hidden">
+            {% if media.local_path %}
+                <!-- 本地文件 -->
+                {% if media.file_type == 'photo' %}
+                <a href="/static/{{ media.local_path }}" target="_blank">
+                    <img src="/static/{{ media.local_path }}" alt="Photo" class="w-full h-64 object-cover hover:opacity-90 transition">
+                </a>
+                {% elif media.file_type == 'video' %}
+                <video controls class="w-full h-64 object-cover">
+                    <source src="/static/{{ media.local_path }}" type="video/mp4">
+                    您的浏览器不支持视频播放。
+                </video>
+                {% elif media.file_type == 'audio' or media.file_type == 'voice' %}
+                <div class="p-4 flex items-center justify-center h-64 bg-gray-100">
+                    <div class="text-center">
+                        <svg class="w-16 h-16 mx-auto mb-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19V6l12-3v13M9 19c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zm12-3c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zM9 10l12-3"></path>
+                        </svg>
+                        <audio controls class="w-full">
+                            <source src="/static/{{ media.local_path }}" type="audio/mpeg">
+                            您的浏览器不支持音频播放。
+                        </audio>
+                    </div>
+                </div>
+                {% elif media.file_type == 'document' %}
+                <div class="p-4 flex items-center justify-center h-64 bg-gray-100">
+                    <div class="text-center">
+                        <svg class="w-16 h-16 mx-auto mb-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z"></path>
+                        </svg>
+                        <a href="/static/{{ media.local_path }}" download class="text-blue-500 hover:underline">下载文档</a>
+                    </div>
+                </div>
+                {% endif %}
+            {% else %}
+                <!-- 没有本地文件 -->
+                <div class="p-4 flex items-center justify-center h-64 bg-gray-200">
+                    <p class="text-gray-500">文件未下载</p>
+                </div>
+            {% endif %}
+
+            <div class="p-4">
+                <div class="text-sm text-gray-600 mb-2">
+                    <span class="font-semibold">类型:</span> {{ media.file_type }}
+                </div>
+                {% if media.caption %}
+                <div class="text-sm text-gray-700">
+                    <span class="font-semibold">说明:</span> {{ media.caption }}
+                </div>
+                {% endif %}
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+</div>
+{% endblock %}

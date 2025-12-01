@@ -16,7 +16,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
 
 from app.database import AsyncSessionLocal
-from app.models import TargetUser, RelayGroup, MessageLog, BotInstance, GroupUserRelay
+from app.models import TargetUser, RelayGroup, MessageLog, BotInstance, GroupUserRelay, MediaFile
 
 # Configure logging
 logging.basicConfig(
@@ -34,10 +34,16 @@ class BotHandler:
         self.bot = bot
         self.dp = dp
 
-        # 媒体组缓存：{media_group_id: [messages]}
+        # 群组媒体组缓存：{media_group_id: [messages]}
         self.media_groups = defaultdict(list)
-        # 媒体组处理任务：{media_group_id: asyncio.Task}
+        # 群组媒体组处理任务：{media_group_id: asyncio.Task}
         self.media_group_tasks = {}
+
+        # 私聊媒体组缓存：{(user_id, media_group_id): [messages]}
+        self.private_media_groups = defaultdict(list)
+        # 私聊媒体组处理任务：{(user_id, media_group_id): asyncio.Task}
+        self.private_media_group_tasks = {}
+
         # 单条消息延迟任务：{message_id: asyncio.Task}
         self.single_message_tasks = {}
         # 消息缓存：{(chat_id, message_id): message} 用于处理编辑
@@ -92,121 +98,132 @@ class BotHandler:
                 await message.answer(f"您已注册过了。\n\n您的 ID：<code>{user_id}</code>")
 
     async def handle_private_msg(self, message: types.Message):
-        """处理私聊消息（用户回复）"""
+        """处理私聊消息（用户回复）- 支持媒体组"""
         if not message.from_user:
             return
 
         # Check if it's media
         if not (message.photo or message.video or message.document or message.audio or message.voice):
-            # Ignore text messages unless they are replies? 
-            # User requirement: "用户如果也回复了媒体消息 也就是我们只处理的内容"
-            # So we only handle media.
             return
 
         user_id = message.from_user.id
-        
+
+        # 如果是媒体组，收集后处理
+        if message.media_group_id:
+            media_group_key = (user_id, message.media_group_id)
+            self.private_media_groups[media_group_key].append(message)
+
+            # 取消之前的任务
+            if media_group_key in self.private_media_group_tasks:
+                self.private_media_group_tasks[media_group_key].cancel()
+
+            # 延迟2秒处理
+            task = asyncio.create_task(self._process_private_media_group(user_id, message.media_group_id))
+            self.private_media_group_tasks[media_group_key] = task
+            return
+
+        # 单条消息，立即处理
+        await self._forward_private_to_groups(user_id, [message])
+
+    async def _process_private_media_group(self, user_id: int, media_group_id: str):
+        """处理私聊媒体组"""
+        await asyncio.sleep(2.0)
+
+        media_group_key = (user_id, media_group_id)
+        messages = self.private_media_groups.get(media_group_key, [])
+
+        if messages:
+            # 按 message_id 排序，确保顺序正确
+            messages.sort(key=lambda m: m.message_id)
+            await self._forward_private_to_groups(user_id, messages)
+
+        # 清理
+        if media_group_key in self.private_media_groups:
+            del self.private_media_groups[media_group_key]
+        if media_group_key in self.private_media_group_tasks:
+            del self.private_media_group_tasks[media_group_key]
+
+    async def _forward_private_to_groups(self, user_id: int, messages: list[types.Message]):
+        """将用户私聊消息转发到群组（用户回复）"""
+        if not messages:
+            return
+
+        is_media_group = len(messages) > 1
+        first_message = messages[0]
+
         async with AsyncSessionLocal() as session:
             # Find active relays for this user
-            # We need to join RelayGroup to check if group is active too? Yes.
             result = await session.execute(
                 select(GroupUserRelay)
                 .options(selectinload(GroupUserRelay.relay_group), selectinload(GroupUserRelay.target_user))
                 .join(RelayGroup)
                 .where(
-                    GroupUserRelay.user_id == user_id, 
+                    GroupUserRelay.user_id == user_id,
                     GroupUserRelay.bot_id == self.bot_id if hasattr(GroupUserRelay, 'bot_id') else RelayGroup.bot_id == self.bot_id,
                     RelayGroup.is_active == True
                 )
             )
             relays = result.scalars().all()
-            
+
             active_relays = [r for r in relays if r.target_user.is_active]
-            
+
             if not active_relays:
                 return
 
-            logger.info(f"[Bot {self.bot_id}] Processing private message from {user_id}, forwarding to {len(active_relays)} groups")
-
-            # Prepare content info
-            msg_type = "unknown"
-            file_id = None
-            caption = message.caption
-            
-            if message.photo:
-                msg_type = "photo"
-                file_id = message.photo[-1].file_id
-            elif message.video:
-                msg_type = "video"
-                file_id = message.video.file_id
-            elif message.document:
-                msg_type = "document"
-                file_id = message.document.file_id
-            elif message.audio:
-                msg_type = "audio"
-                file_id = message.audio.file_id
-            elif message.voice:
-                msg_type = "voice"
-                file_id = message.voice.file_id
+            logger.info(f"[Bot {self.bot_id}] User reply: forwarding from user {user_id} to {len(active_relays)} groups (media_group={is_media_group})")
 
             for relay in active_relays:
-                # Increment Index
-                relay.current_index += 1
-                idx = relay.current_index
-                
-                # Format Message Suffix
-                if relay.tag:
-                    suffix = f"{relay.tag}{idx}"
-                else:
-                    suffix = f"#{idx}"
-                
-                final_caption = f"{caption}     {suffix}" if caption else suffix
-                
                 try:
                     group_id = relay.group_id
-                    sent = False
-                    
-                    if message.photo:
-                        await self.bot.send_photo(group_id, file_id, caption=final_caption)
-                        sent = True
-                    elif message.video:
-                        await self.bot.send_video(group_id, file_id, caption=final_caption)
-                        sent = True
-                    elif message.document:
-                        await self.bot.send_document(group_id, file_id, caption=final_caption)
-                        sent = True
-                    elif message.audio:
-                        await self.bot.send_audio(group_id, file_id, caption=final_caption)
-                        sent = True
-                    elif message.voice:
-                        await self.bot.send_voice(group_id, file_id, caption=final_caption)
-                        sent = True
-                        
-                    if sent:
-                        log = MessageLog(
-                            user_tag=relay.tag or "",
-                            recipient_id=user_id,
-                            group_id=group_id,
-                            assigned_index=idx,
-                            original_sender_name=message.from_user.full_name,
-                            direction="inbound",  # User -> Group
-                            message_type=msg_type,
-                            content=caption,
-                            file_id=file_id
-                        )
-                        session.add(log)
-                        logger.info(f"✅ Forwarded private message to group {group_id} ({suffix})")
+
+                    # 转发到群组（不加序号，不保存数据库）
+                    if is_media_group:
+                        # 媒体组：保持原始caption
+                        media_list = []
+                        for msg in messages:
+                            caption = msg.caption if msg.caption else None
+
+                            if msg.photo:
+                                media_list.append(InputMediaPhoto(media=msg.photo[-1].file_id, caption=caption, parse_mode=ParseMode.HTML))
+                            elif msg.video:
+                                media_list.append(InputMediaVideo(media=msg.video.file_id, caption=caption, parse_mode=ParseMode.HTML))
+                            elif msg.document:
+                                media_list.append(InputMediaDocument(media=msg.document.file_id, caption=caption, parse_mode=ParseMode.HTML))
+                            elif msg.audio:
+                                media_list.append(InputMediaAudio(media=msg.audio.file_id, caption=caption, parse_mode=ParseMode.HTML))
+
+                        if media_list:
+                            await self.bot.send_media_group(group_id, media_list)
+                            logger.info(f"✅ User reply: Forwarded media group ({len(media_list)} items) to group {group_id}")
+                    else:
+                        # 单条消息：保持原始caption
+                        msg = messages[0]
+                        caption = msg.caption
+
+                        if msg.photo:
+                            await self.bot.send_photo(group_id, msg.photo[-1].file_id, caption=caption)
+                        elif msg.video:
+                            await self.bot.send_video(group_id, msg.video.file_id, caption=caption)
+                        elif msg.document:
+                            await self.bot.send_document(group_id, msg.document.file_id, caption=caption)
+                        elif msg.audio:
+                            await self.bot.send_audio(group_id, msg.audio.file_id, caption=caption)
+                        elif msg.voice:
+                            await self.bot.send_voice(group_id, msg.voice.file_id, caption=caption)
+
+                        logger.info(f"✅ User reply: Forwarded single message to group {group_id}")
+
+                    # 手动触发转发给该群组的所有用户（因为bot自己发的消息不会触发 handle_group_msg）
+                    # 这里会处理序号+1和数据库保存
+                    chat_title = relay.relay_group.title if relay.relay_group else "Unknown Group"
+                    logger.info(f"[Bot {self.bot_id}] Triggering forward_messages_to_users for group {group_id}")
+                    await self.forward_messages_to_users(messages, group_id, chat_title, "inbound")
 
                 except Exception as e:
-                    logger.error(f"Failed to forward to group {relay.group_id}: {e}")
-            
-            await session.commit()
+                    logger.error(f"Failed to forward user reply to group {relay.group_id}: {e}")
 
     async def handle_group_msg(self, message: types.Message):
         """处理群组消息"""
-
-        print(message.from_user)
-        print(message)
-
 
         if not message.from_user:
             return
@@ -329,7 +346,7 @@ class BotHandler:
 
     async def process_single_message(self, message: types.Message, chat_id: int, chat_title: str):
         """处理单条消息（延迟 2 分钟后执行）"""
-        await asyncio.sleep(120.0)
+        await asyncio.sleep(20.0)
 
         # 检查消息是否仍在缓存中
         cache_key = (chat_id, message.message_id)
@@ -372,12 +389,15 @@ class BotHandler:
 
     async def process_media_group(self, media_group_id: str, chat_id: int, chat_title: str):
         """处理媒体组（延迟 2 分钟后执行）"""
-        await asyncio.sleep(120.0)
+        await asyncio.sleep(20.0)
 
         messages = self.media_groups.get(media_group_id, [])
         if not messages:
             logger.warning(f"[Bot {self.bot_id}] 媒体组 {media_group_id} 为空")
             return
+
+        # 按 message_id 排序，确保顺序正确
+        messages.sort(key=lambda m: m.message_id)
 
         # 找到第一个有 caption 的消息用于点赞
         message_to_react = None
@@ -448,7 +468,7 @@ class BotHandler:
                 msg_type = "text"
             logger.info(f"  Message {i}: type={msg_type}, caption={msg.caption or 'None'}")
 
-        # 转发消息（使用最新版本）
+        # 转发消息（使用最新版本）s
         logger.info(f"[Bot {self.bot_id}] 开始转发媒体组 {media_group_id}")
         await self.forward_messages_to_users(updated_messages, chat_id, chat_title)
 
@@ -463,7 +483,7 @@ class BotHandler:
             del self.media_group_tasks[media_group_id]
 
     async def forward_messages_to_users(
-        self, messages: list[types.Message], chat_id: int, chat_title: str
+        self, messages: list[types.Message], chat_id: int, chat_title: str, direction: str = 'outbound'
     ):
         """转发单条或多条消息到配置的用户"""
         if not messages:
@@ -694,12 +714,48 @@ class BotHandler:
                             group_id=group.group_id,
                             assigned_index=idx,
                             original_sender_name=first_message.from_user.full_name,
-                            direction="outbound",
+                            direction=direction,
                             message_type=msg_type,
                             content=content,
                             file_id=file_id
                         )
                         session.add(log)
+                        await session.flush()  # 获取 log.id
+
+                        # 为每个媒体文件创建 MediaFile 记录并下载
+                        for msg in messages:
+                            media_file_type = None
+                            media_file_id = None
+                            media_caption = msg.caption
+
+                            if msg.photo:
+                                media_file_type = "photo"
+                                media_file_id = msg.photo[-1].file_id
+                            elif msg.video:
+                                media_file_type = "video"
+                                media_file_id = msg.video.file_id
+                            elif msg.document:
+                                media_file_type = "document"
+                                media_file_id = msg.document.file_id
+                            elif msg.audio:
+                                media_file_type = "audio"
+                                media_file_id = msg.audio.file_id
+                            elif msg.voice:
+                                media_file_type = "voice"
+                                media_file_id = msg.voice.file_id
+
+                            if media_file_type and media_file_id:
+                                # 下载文件
+                                local_path = await self._download_media_file(media_file_id, media_file_type)
+
+                                media_file = MediaFile(
+                                    message_log_id=log.id,
+                                    file_id=media_file_id,
+                                    file_type=media_file_type,
+                                    caption=media_caption,
+                                    local_path=local_path
+                                )
+                                session.add(media_file)
 
                 except Exception as e:
                     logger.error(f"Failed to send to {target_user_id}: {e}")
@@ -712,6 +768,55 @@ class BotHandler:
                 logger.warning(f"⚠️ [Bot {self.bot_id}] 没有发送任何消息（可能都是不支持的媒体类型）")
 
             await session.commit()
+
+    async def _download_media_file(self, file_id: str, file_type: str) -> str:
+        """下载媒体文件到本地"""
+        import os
+        from datetime import datetime
+
+        try:
+            # 获取文件信息
+            file = await self.bot.get_file(file_id)
+
+            # 确定文件扩展名
+            ext_map = {
+                "photo": ".jpg",
+                "video": ".mp4",
+                "audio": ".mp3",
+                "voice": ".ogg",
+                "document": ""  # 文档类型从原始文件路径获取
+            }
+
+            # 生成唯一文件名
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            file_id_short = file_id[:10]  # 使用 file_id 前10个字符
+
+            # 获取扩展名
+            if file_type == "document" and file.file_path:
+                # 从原始文件路径获取扩展名
+                original_ext = os.path.splitext(file.file_path)[1]
+                ext = original_ext if original_ext else ".bin"
+            else:
+                ext = ext_map.get(file_type, ".bin")
+
+            filename = f"{timestamp}_{file_id_short}{ext}"
+
+            # 确保目录存在
+            media_dir = "app/static/media"
+            os.makedirs(media_dir, exist_ok=True)
+
+            # 下载文件
+            file_path = os.path.join(media_dir, filename)
+            await self.bot.download_file(file.file_path, file_path)
+
+            logger.info(f"✅ Downloaded media file: {filename}")
+
+            # 返回相对路径（用于 HTML 中的 /static/ 路径）
+            return f"media/{filename}"
+
+        except Exception as e:
+            logger.error(f"Failed to download media file {file_id}: {e}")
+            return None
 
 
 class BotManager:

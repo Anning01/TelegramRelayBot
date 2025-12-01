@@ -65,8 +65,10 @@
                 </td>
                 <td class="p-2 border-b whitespace-nowrap">{{ log.original_sender_name or '-' }}</td>
                 <td class="p-2 border-b whitespace-nowrap">
-                    {% if log.file_id %}
-                    <a href="/log/media/{{ log.id }}" target="_blank" class="text-blue-500 hover:underline">查看媒体</a>
+                    {% if log.media_files %}
+                    <a href="/log/media/{{ log.id }}" class="text-blue-500 hover:underline">
+                        查看媒体 ({{ log.media_files|length }})
+                    </a>
                     {% else %}
                     <span class="text-gray-400">-</span>
                     {% endif %}

@@ -16,7 +16,7 @@ from sqlalchemy.orm import selectinload
 
 from app.bot_manager import bot_manager
 from app.database import init_db, get_db, AsyncSessionLocal
-from app.models import TargetUser, RelayGroup, MessageLog, BotInstance, GroupUserRelay
+from app.models import TargetUser, RelayGroup, MessageLog, BotInstance, GroupUserRelay, MediaFile
 
 logger = logging.getLogger(__name__)
 
@@ -108,7 +108,7 @@ async def lifespan(app: FastAPI):
     # 初始化数据库
     await init_db()
     
-    # 简单迁移：检查并添加新列
+    # 简单迁移：检查并添加新列和新表
     try:
         async with AsyncSessionLocal() as session:
             # Check if columns exist by trying to select them
@@ -126,6 +126,25 @@ async def lifespan(app: FastAPI):
                 await session.execute(text("ALTER TABLE message_logs ADD COLUMN group_id BIGINT"))
                 await session.commit()
                 logger.info("✅ Database migration complete")
+
+            # 检查并创建 media_files 表
+            try:
+                await session.execute(text("SELECT id FROM media_files LIMIT 1"))
+            except Exception:
+                logger.info("🔄 Creating media_files table...")
+                await session.execute(text("""
+                    CREATE TABLE media_files (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        message_log_id INTEGER NOT NULL,
+                        file_id VARCHAR NOT NULL,
+                        file_type VARCHAR NOT NULL,
+                        local_path VARCHAR,
+                        caption TEXT,
+                        FOREIGN KEY (message_log_id) REFERENCES message_logs (id)
+                    )
+                """))
+                await session.commit()
+                logger.info("✅ media_files table created")
     except Exception as e:
         logger.warning(f"Migration check failed (might be fresh db): {e}")
 
@@ -386,8 +405,12 @@ async def view_logs(
     db=Depends(get_db)
 ):
     """日志查看页面"""
-    stmt = select(MessageLog).order_by(desc(MessageLog.timestamp))
-    
+    stmt = (
+        select(MessageLog)
+        .options(selectinload(MessageLog.media_files))
+        .order_by(desc(MessageLog.timestamp))
+    )
+
     if date:
         # Filter by date (YYYY-MM-DD)
         try:
@@ -395,22 +418,22 @@ async def view_logs(
             stmt = stmt.where(func.date(MessageLog.timestamp) == target_date)
         except ValueError:
             pass
-            
+
     if tag:
         stmt = stmt.where(MessageLog.user_tag == tag)
-        
+
     if direction:
         stmt = stmt.where(MessageLog.direction == direction)
-        
+
     # Limit to recent 500 logs for display
     stmt = stmt.limit(500)
-    
+
     logs = (await db.execute(stmt)).scalars().all()
-    
+
     return templates.TemplateResponse(
-        "logs.html", 
+        "logs.html",
         {
-            "request": request, 
+            "request": request,
             "logs": logs,
             "filter_date": date,
             "filter_tag": tag,
@@ -419,48 +442,32 @@ async def view_logs(
     )
 
 
-@app.get("/log/media/{log_id}")
-async def view_log_media(log_id: int, db=Depends(get_db)):
-    """Redirect to the Telegram media URL"""
-    # 1. Get Log
-    log = await db.get(MessageLog, log_id)
-    if not log or not log.file_id:
-        return HTMLResponse("Media not found or no file_id", status_code=404)
-
-    # 2. Get Bot Token via Group
-    # We need to join RelayGroup -> BotInstance
+@app.get("/log/media/{log_id}", response_class=HTMLResponse)
+async def view_log_media(request: Request, log_id: int, db=Depends(get_db)):
+    """查看日志的所有媒体文件"""
+    # 获取日志及其媒体文件
     stmt = (
-        select(BotInstance)
-        .join(RelayGroup, RelayGroup.bot_id == BotInstance.id)
-        .where(RelayGroup.group_id == log.group_id)
+        select(MessageLog)
+        .options(selectinload(MessageLog.media_files))
+        .where(MessageLog.id == log_id)
     )
-    bot_instance = (await db.execute(stmt)).scalars().first()
-    
-    if not bot_instance:
-        return HTMLResponse("Bot not found for this message", status_code=404)
+    log = (await db.execute(stmt)).scalars().first()
 
-    # 3. Get Bot Handler to call get_file
-    # We can use the bot_manager if the bot is active
-    handler = bot_manager.bot_handlers.get(bot_instance.id)
-    
-    if not handler:
-        # If bot is not active in manager, we can temporarily create a bot instance just to get file?
-        # Or just fail.
-        return HTMLResponse("Bot is not active, cannot fetch media path", status_code=400)
+    if not log:
+        return HTMLResponse("Log not found", status_code=404)
 
-    try:
-        # 4. Get File info from Telegram
-        file_info = await handler.bot.get_file(log.file_id)
-        file_path = file_info.file_path
-        
-        # 5. Construct URL
-        # https://api.telegram.org/file/bot<token>/<file_path>
-        file_url = f"https://api.telegram.org/file/bot{bot_instance.token}/{file_path}"
-        
-        return RedirectResponse(file_url)
-    except Exception as e:
-        logger.error(f"Failed to get file url: {e}")
-        return HTMLResponse(f"Failed to retrieve media: {e}", status_code=500)
+    # 如果没有媒体文件，返回提示
+    if not log.media_files:
+        return HTMLResponse("No media files found for this log", status_code=404)
+
+    return templates.TemplateResponse(
+        "log_media.html",
+        {
+            "request": request,
+            "log": log,
+            "media_files": log.media_files
+        }
+    )
 
 
 import csv
@@ -469,40 +476,61 @@ from fastapi.responses import Response
 
 @app.get("/logs/export")
 async def export_logs(
+    request: Request,
     date: str = None,
     tag: str = None,
     direction: str = None,
     db=Depends(get_db)
 ):
-    """导出日志为 CSV"""
-    stmt = select(MessageLog).order_by(desc(MessageLog.timestamp))
-    
+    """导出日志为 CSV（包含媒体文件信息）"""
+    stmt = (
+        select(MessageLog)
+        .options(selectinload(MessageLog.media_files))
+        .order_by(desc(MessageLog.timestamp))
+    )
+
     if date:
         try:
             target_date = datetime.strptime(date, "%Y-%m-%d").date()
             stmt = stmt.where(func.date(MessageLog.timestamp) == target_date)
         except ValueError:
             pass
-            
+
     if tag:
         stmt = stmt.where(MessageLog.user_tag == tag)
-        
+
     if direction:
         stmt = stmt.where(MessageLog.direction == direction)
-    
+
     logs = (await db.execute(stmt)).scalars().all()
-    
+
+    # 获取基础 URL（用于生成媒体文件的完整 URL）
+    base_url = str(request.base_url).rstrip('/')
+
     # Create CSV
     output = io.StringIO()
     writer = csv.writer(output)
-    
+
     # Header
     writer.writerow([
-        "ID", "Time", "Direction", "Group ID", "User ID", "Tag", 
-        "Index", "Type", "Content/Caption", "File ID", "Original Sender"
+        "ID", "Time", "Direction", "Group ID", "User ID", "Tag",
+        "Index", "Type", "Content/Caption", "Original Sender",
+        "Media Count", "Media URLs", "Media Types"
     ])
-    
+
     for log in logs:
+        # 构建媒体文件信息
+        media_count = len(log.media_files) if log.media_files else 0
+        media_urls = []
+        media_types = []
+
+        if log.media_files:
+            for media in log.media_files:
+                if media.local_path:
+                    # 生成完整的 URL
+                    media_urls.append(f"{base_url}/static/{media.local_path}")
+                    media_types.append(media.file_type)
+
         writer.writerow([
             log.id,
             log.timestamp.strftime("%Y-%m-%d %H:%M:%S"),
@@ -513,12 +541,14 @@ async def export_logs(
             log.assigned_index,
             log.message_type,
             log.content,
-            log.file_id,
-            log.original_sender_name
+            log.original_sender_name,
+            media_count,
+            "; ".join(media_urls) if media_urls else "",
+            "; ".join(media_types) if media_types else ""
         ])
-        
+
     output.seek(0)
-    
+
     filename = f"logs_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
     
     return Response(
