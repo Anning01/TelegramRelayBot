@@ -194,6 +194,16 @@ if not os.path.exists("app/static"):
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 templates = Jinja2Templates(directory="app/templates")
 
+# 添加时区转换过滤器（UTC+8 北京时间）
+def to_beijing_time(dt):
+    """将 UTC 时间转换为北京时间 (UTC+8)"""
+    if dt:
+        from datetime import timedelta
+        return dt + timedelta(hours=8)
+    return dt
+
+templates.env.filters['beijing_time'] = to_beijing_time
+
 
 @app.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request, db=Depends(get_db)):
@@ -531,9 +541,12 @@ async def export_logs(
                     media_urls.append(f"{base_url}/static/{media.local_path}")
                     media_types.append(media.file_type)
 
+        # 转换为北京时间（UTC+8）
+        beijing_time = log.timestamp + timedelta(hours=8)
+
         writer.writerow([
             log.id,
-            log.timestamp.strftime("%Y-%m-%d %H:%M:%S"),
+            beijing_time.strftime("%Y-%m-%d %H:%M:%S"),
             "发给用户" if log.direction == "outbound" else "用户回复",
             log.group_id,
             log.recipient_id,
