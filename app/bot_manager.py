@@ -61,6 +61,13 @@ class BotHandler:
         async def handle_edited_message(message: types.Message):
             await self.handle_message_edit(message)
 
+        @self.dp.message(F.chat.type == "private")
+        async def handle_private_message(message: types.Message):
+            # Ignore commands
+            if message.text and message.text.startswith("/"):
+                return
+            await self.handle_private_msg(message)
+
     async def handle_start(self, message: types.Message):
         """处理 /start 命令"""
         async with AsyncSessionLocal() as session:
@@ -84,10 +91,133 @@ class BotHandler:
             else:
                 await message.answer(f"您已注册过了。\n\n您的 ID：<code>{user_id}</code>")
 
-    async def handle_group_msg(self, message: types.Message):
-        """处理群组消息"""
+    async def handle_private_msg(self, message: types.Message):
+        """处理私聊消息（用户回复）"""
         if not message.from_user:
             return
+
+        # Check if it's media
+        if not (message.photo or message.video or message.document or message.audio or message.voice):
+            # Ignore text messages unless they are replies? 
+            # User requirement: "用户如果也回复了媒体消息 也就是我们只处理的内容"
+            # So we only handle media.
+            return
+
+        user_id = message.from_user.id
+        
+        async with AsyncSessionLocal() as session:
+            # Find active relays for this user
+            # We need to join RelayGroup to check if group is active too? Yes.
+            result = await session.execute(
+                select(GroupUserRelay)
+                .options(selectinload(GroupUserRelay.relay_group), selectinload(GroupUserRelay.target_user))
+                .join(RelayGroup)
+                .where(
+                    GroupUserRelay.user_id == user_id, 
+                    GroupUserRelay.bot_id == self.bot_id if hasattr(GroupUserRelay, 'bot_id') else RelayGroup.bot_id == self.bot_id,
+                    RelayGroup.is_active == True
+                )
+            )
+            relays = result.scalars().all()
+            
+            active_relays = [r for r in relays if r.target_user.is_active]
+            
+            if not active_relays:
+                return
+
+            logger.info(f"[Bot {self.bot_id}] Processing private message from {user_id}, forwarding to {len(active_relays)} groups")
+
+            # Prepare content info
+            msg_type = "unknown"
+            file_id = None
+            caption = message.caption
+            
+            if message.photo:
+                msg_type = "photo"
+                file_id = message.photo[-1].file_id
+            elif message.video:
+                msg_type = "video"
+                file_id = message.video.file_id
+            elif message.document:
+                msg_type = "document"
+                file_id = message.document.file_id
+            elif message.audio:
+                msg_type = "audio"
+                file_id = message.audio.file_id
+            elif message.voice:
+                msg_type = "voice"
+                file_id = message.voice.file_id
+
+            for relay in active_relays:
+                # Increment Index
+                relay.current_index += 1
+                idx = relay.current_index
+                
+                # Format Message Suffix
+                if relay.tag:
+                    suffix = f"{relay.tag}{idx}"
+                else:
+                    suffix = f"#{idx}"
+                
+                final_caption = f"{caption}     {suffix}" if caption else suffix
+                
+                try:
+                    group_id = relay.group_id
+                    sent = False
+                    
+                    if message.photo:
+                        await self.bot.send_photo(group_id, file_id, caption=final_caption)
+                        sent = True
+                    elif message.video:
+                        await self.bot.send_video(group_id, file_id, caption=final_caption)
+                        sent = True
+                    elif message.document:
+                        await self.bot.send_document(group_id, file_id, caption=final_caption)
+                        sent = True
+                    elif message.audio:
+                        await self.bot.send_audio(group_id, file_id, caption=final_caption)
+                        sent = True
+                    elif message.voice:
+                        await self.bot.send_voice(group_id, file_id, caption=final_caption)
+                        sent = True
+                        
+                    if sent:
+                        log = MessageLog(
+                            user_tag=relay.tag or "",
+                            recipient_id=user_id,
+                            group_id=group_id,
+                            assigned_index=idx,
+                            original_sender_name=message.from_user.full_name,
+                            direction="inbound",  # User -> Group
+                            message_type=msg_type,
+                            content=caption,
+                            file_id=file_id
+                        )
+                        session.add(log)
+                        logger.info(f"✅ Forwarded private message to group {group_id} ({suffix})")
+
+                except Exception as e:
+                    logger.error(f"Failed to forward to group {relay.group_id}: {e}")
+            
+            await session.commit()
+
+    async def handle_group_msg(self, message: types.Message):
+        """处理群组消息"""
+
+        print(message.from_user)
+        print(message)
+
+
+        if not message.from_user:
+            return
+
+        chat_id = message.chat.id
+        chat_title = message.chat.title or "Unknown Group"
+
+        # 如果是系统消息（如被加入群组），先注册群组
+        if message.new_chat_members or message.group_chat_created or message.supergroup_chat_created:
+            logger.info(f"[Bot {self.bot_id}] 检测到群组变动消息，确保群组 {chat_title} ({chat_id}) 已注册")
+            await self.ensure_group_exists(chat_id, chat_title)
 
         # 只处理媒体消息（图片、视频、文档、音频、语音）
         # 忽略纯文本消息和系统消息（如用户加入/离开群组）
@@ -96,9 +226,6 @@ class BotHandler:
                 f"[Bot {self.bot_id}] 跳过非媒体消息: {message.text or '[System Message]'}"
             )
             return
-
-        chat_id = message.chat.id
-        chat_title = message.chat.title or "Unknown Group"
 
         # Log the incoming message
         logger.info(
@@ -536,11 +663,41 @@ class BotHandler:
                     # 只有实际发送了消息才记录日志
                     if sent_to_user:
                         actually_sent = True
+                        
+                        # Determine message type and file_id for logging
+                        msg_type = "text"
+                        file_id = None
+                        content = final_text if not is_media_group else (caption if caption else None)
+                        
+                        if is_media_group:
+                             # Log the first media item's type or generic "media_group"
+                             # Actually we are logging one entry per user per forward event (group of messages or single)
+                             # But here we loop active_relays. Inside, we sent a media group or single message.
+                             # Let's pick the type from the first message if media group
+                             first = messages[0]
+                             if first.photo: msg_type = "photo"; file_id = first.photo[-1].file_id
+                             elif first.video: msg_type = "video"; file_id = first.video.file_id
+                             elif first.document: msg_type = "document"; file_id = first.document.file_id
+                             elif first.audio: msg_type = "audio"; file_id = first.audio.file_id
+                        else:
+                            msg = messages[0]
+                            if msg.photo: msg_type = "photo"; file_id = msg.photo[-1].file_id
+                            elif msg.video: msg_type = "video"; file_id = msg.video.file_id
+                            elif msg.document: msg_type = "document"; file_id = msg.document.file_id
+                            elif msg.voice: msg_type = "voice"; file_id = msg.voice.file_id
+                            elif msg.audio: msg_type = "audio"; file_id = msg.audio.file_id
+                            elif msg.text: msg_type = "text"; content = msg.text
+                        
                         log = MessageLog(
                             user_tag=relay.tag or "",
                             recipient_id=target_user_id,
+                            group_id=group.group_id,
                             assigned_index=idx,
                             original_sender_name=first_message.from_user.full_name,
+                            direction="outbound",
+                            message_type=msg_type,
+                            content=content,
+                            file_id=file_id
                         )
                         session.add(log)
 

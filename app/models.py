@@ -73,7 +73,22 @@ class MessageLog(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     timestamp = Column(DateTime(timezone=True), server_default=func.now())
+    
+    # 关联信息
+    group_id = Column(BigInteger, ForeignKey("relay_groups.group_id"), nullable=True)
+    recipient_id = Column(BigInteger, ForeignKey("target_users.user_id"), nullable=True)
+    
+    # 消息详情
     user_tag = Column(String, index=True)  # 接收用户的标记
-    recipient_id = Column(BigInteger, ForeignKey("target_users.user_id"))
     assigned_index = Column(Integer)
     original_sender_name = Column(String, nullable=True)
+    
+    # 新增字段
+    direction = Column(String, default="outbound")  # outbound: 群->用户, inbound: 用户->群
+    message_type = Column(String, nullable=True)    # text, photo, video, etc.
+    content = Column(Text, nullable=True)           # 文字内容或 caption
+    file_id = Column(String, nullable=True)         # 媒体文件的 file_id
+    
+    # 关联对象
+    target_user = relationship("TargetUser")
+    relay_group = relationship("RelayGroup")
