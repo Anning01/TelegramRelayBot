@@ -155,7 +155,7 @@ async def lifespan(app: FastAPI):
     await bot_manager.load_bots_from_db()
 
     # 配置定时任务：每天重置序号
-    reset_time = os.getenv("RESET_TIME", "08:00")  # 默认早上8点
+    reset_time = os.getenv("RESET_TIME", "16:00")  # 默认早上8点 由于时区问题 16:00 对应北京时间 08:00
     hour, minute = reset_time.split(":")
     scheduler.add_job(
         reset_user_indexes,
@@ -173,7 +173,7 @@ async def lifespan(app: FastAPI):
     )
     
     scheduler.start()
-    logger.info(f"⏰ 定时任务已启动：每天 {reset_time} (北京时间) 重置序号")
+    logger.info(f"⏰ 定时任务已启动：每天 {reset_time} (美国时间) 重置序号")
 
     yield
 
