@@ -412,12 +412,19 @@ async def view_logs(
     date: str = None,
     tag: str = None,
     direction: str = None,
+    bot_id: int = None,
     db=Depends(get_db)
 ):
     """日志查看页面"""
+    # 获取所有 Bot 用于筛选
+    bots = (await db.execute(select(BotInstance))).scalars().all()
+
     stmt = (
         select(MessageLog)
-        .options(selectinload(MessageLog.media_files))
+        .options(
+            selectinload(MessageLog.media_files),
+            selectinload(MessageLog.relay_group).selectinload(RelayGroup.bot_instance)
+        )
         .order_by(desc(MessageLog.timestamp))
     )
 
@@ -435,6 +442,9 @@ async def view_logs(
     if direction:
         stmt = stmt.where(MessageLog.direction == direction)
 
+    if bot_id:
+        stmt = stmt.join(RelayGroup, MessageLog.group_id == RelayGroup.group_id).where(RelayGroup.bot_id == bot_id)
+
     # Limit to recent 500 logs for display
     stmt = stmt.limit(500)
 
@@ -445,9 +455,11 @@ async def view_logs(
         {
             "request": request,
             "logs": logs,
+            "bots": bots,
             "filter_date": date,
             "filter_tag": tag,
-            "filter_direction": direction
+            "filter_direction": direction,
+            "filter_bot_id": bot_id
         }
     )
 
@@ -490,12 +502,16 @@ async def export_logs(
     date: str = None,
     tag: str = None,
     direction: str = None,
+    bot_id: int = None,
     db=Depends(get_db)
 ):
     """导出日志为 CSV（包含媒体文件信息）"""
     stmt = (
         select(MessageLog)
-        .options(selectinload(MessageLog.media_files))
+        .options(
+            selectinload(MessageLog.media_files),
+            selectinload(MessageLog.relay_group).selectinload(RelayGroup.bot_instance)
+        )
         .order_by(desc(MessageLog.timestamp))
     )
 
@@ -512,6 +528,9 @@ async def export_logs(
     if direction:
         stmt = stmt.where(MessageLog.direction == direction)
 
+    if bot_id:
+        stmt = stmt.join(RelayGroup, MessageLog.group_id == RelayGroup.group_id).where(RelayGroup.bot_id == bot_id)
+
     logs = (await db.execute(stmt)).scalars().all()
 
     # 获取基础 URL（用于生成媒体文件的完整 URL）
@@ -523,7 +542,7 @@ async def export_logs(
 
     # Header
     writer.writerow([
-        "ID", "Time", "Direction", "Group ID", "User ID", "Tag",
+        "ID", "Time", "Bot", "Direction", "Group ID", "User ID", "Tag",
         "Index", "Type", "Content/Caption", "Original Sender",
         "Media Count", "Media URLs", "Media Types"
     ])
@@ -543,10 +562,14 @@ async def export_logs(
 
         # 转换为北京时间（UTC+8）
         beijing_time = log.timestamp + timedelta(hours=8)
+        
+        # 获取 Bot 名称
+        bot_name = log.relay_group.bot_instance.name if log.relay_group and log.relay_group.bot_instance else "Unknown"
 
         writer.writerow([
             log.id,
             beijing_time.strftime("%Y-%m-%d %H:%M:%S"),
+            bot_name,
             "发给用户" if log.direction == "outbound" else "用户回复",
             log.group_id,
             log.recipient_id,

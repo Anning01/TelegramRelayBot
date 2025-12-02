@@ -5,6 +5,15 @@
 <div class="bg-white rounded shadow p-6 mb-6">
     <form method="get" class="flex gap-4 items-end flex-wrap">
         <div>
+            <label class="block text-sm font-medium mb-1">Bot</label>
+            <select name="bot_id" class="border p-2 rounded w-40">
+                <option value="">全部 Bot</option>
+                {% for bot in bots %}
+                <option value="{{ bot.id }}" {% if filter_bot_id == bot.id %}selected{% endif %}>{{ bot.name }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div>
             <label class="block text-sm font-medium mb-1">日期</label>
             <input type="date" name="date" value="{{ filter_date or '' }}" class="border p-2 rounded">
         </div>
@@ -22,7 +31,7 @@
         </div>
         <button type="submit" class="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600">筛选</button>
         <a href="/logs" class="bg-gray-500 text-white px-4 py-2 rounded hover:bg-gray-600">重置</a>
-        <a href="/logs/export?date={{ filter_date or '' }}&tag={{ filter_tag or '' }}&direction={{ filter_direction or '' }}" 
+        <a href="/logs/export?date={{ filter_date or '' }}&tag={{ filter_tag or '' }}&direction={{ filter_direction or '' }}&bot_id={{ filter_bot_id or '' }}" 
            target="_blank"
            class="bg-green-500 text-white px-4 py-2 rounded hover:bg-green-600 ml-auto">
            导出 CSV
@@ -35,6 +44,7 @@
         <thead>
             <tr>
                 <th class="border-b p-2 whitespace-nowrap">时间</th>
+                <th class="border-b p-2 whitespace-nowrap">Bot</th>
                 <th class="border-b p-2 whitespace-nowrap">方向</th>
                 <th class="border-b p-2 whitespace-nowrap">类型</th>
                 <th class="border-b p-2 whitespace-nowrap">群组 ID</th>
@@ -49,6 +59,13 @@
             {% for log in logs %}
             <tr class="hover:bg-gray-50">
                 <td class="p-2 border-b whitespace-nowrap">{{ (log.timestamp|beijing_time).strftime('%Y-%m-%d %H:%M:%S') }}</td>
+                <td class="p-2 border-b whitespace-nowrap font-medium text-gray-700">
+                    {% if log.relay_group and log.relay_group.bot_instance %}
+                    {{ log.relay_group.bot_instance.name }}
+                    {% else %}
+                    <span class="text-gray-400">Unknown</span>
+                    {% endif %}
+                </td>
                 <td class="p-2 border-b whitespace-nowrap">
                     {% if log.direction == 'outbound' %}
                     <span class="text-blue-600">发给用户</span>
