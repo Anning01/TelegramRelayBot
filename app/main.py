@@ -1,4 +1,5 @@
-import logging
+import csv
+import io
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -6,12 +7,14 @@ from contextlib import asynccontextmanager
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from dotenv import load_dotenv
-from fastapi import FastAPI, Request, Depends
+from fastapi import FastAPI, Request, Depends, Query
 from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import select, func, desc
 from sqlalchemy.orm import selectinload
+from typing import Optional
 
 from app.bot_manager import bot_manager
 from app.database import init_db, get_db, AsyncSessionLocal
@@ -389,7 +392,7 @@ async def view_logs(
     date: str = None,
     tag: str = None,
     direction: str = None,
-    bot_id: int = None,
+    bot_id: int | None = Query(default=None),
     db=Depends(get_db)
 ):
     """日志查看页面"""
@@ -469,17 +472,13 @@ async def view_log_media(request: Request, log_id: int, db=Depends(get_db)):
     )
 
 
-import csv
-import io
-from fastapi.responses import Response
-
 @app.get("/logs/export")
 async def export_logs(
     request: Request,
     date: str = None,
     tag: str = None,
     direction: str = None,
-    bot_id: int = None,
+    bot_id: Optional[str] = Query(None, description="Bot ID（可选，整数）"),
     db=Depends(get_db)
 ):
     """导出日志为 CSV（包含媒体文件信息）"""
@@ -505,8 +504,17 @@ async def export_logs(
     if direction:
         stmt = stmt.where(MessageLog.direction == direction)
 
-    if bot_id:
-        stmt = stmt.join(RelayGroup, MessageLog.group_id == RelayGroup.group_id).where(RelayGroup.bot_id == bot_id)
+
+    # Bot ID 过滤（关键修复：手动转换字符串为整数）
+    bot_id_int: Optional[int] = None
+    if bot_id and bot_id.strip():  # 排除空字符串和纯空格
+        try:
+            bot_id_int = int(bot_id.strip())
+        except ValueError:
+            pass  # 非法整数格式，忽略该过滤条件
+
+    if bot_id_int:
+        stmt = stmt.join(RelayGroup, MessageLog.group_id == RelayGroup.group_id).where(RelayGroup.bot_id == bot_id_int)
 
     logs = (await db.execute(stmt)).scalars().all()
 
