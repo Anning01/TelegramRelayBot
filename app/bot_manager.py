@@ -213,12 +213,6 @@ class BotHandler:
 
                         logger.info(f"✅ User reply: Forwarded single message to group {group_id}")
 
-                    # 手动触发转发给该群组的所有用户（因为bot自己发的消息不会触发 handle_group_msg）
-                    # 这里会处理序号+1和数据库保存
-                    chat_title = relay.relay_group.title if relay.relay_group else "Unknown Group"
-                    logger.info(f"[Bot {self.bot_id}] Triggering forward_messages_to_users for group {group_id}")
-                    await self.forward_messages_to_users(messages, group_id, chat_title, "inbound")
-
                 except Exception as e:
                     logger.error(f"Failed to forward user reply to group {relay.group_id}: {e}")
 
@@ -557,17 +551,6 @@ class BotHandler:
             actually_sent = False
 
             for relay in active_relays:
-                # Increment Index
-                relay.current_index += 1
-                idx = relay.current_index
-
-                # Format Message Suffix - 使用该群组-用户关系中的自定义标记
-                if relay.tag:
-                    suffix = f"{relay.tag}{idx}"
-                else:
-                    # 如果没有设置标记，只显示序号
-                    suffix = f"#{idx}"
-
                 target_user_id = relay.target_user.user_id
                 sent_to_user = False  # 追踪是否给这个用户发送了消息
 
@@ -576,26 +559,9 @@ class BotHandler:
                         # 媒体组：发送多个媒体
                         media_list = []
 
-                        # 找到第一个有实际内容的 caption
-                        first_caption_index = -1
                         for i, msg in enumerate(messages):
-                            if msg.caption:
-                                first_caption_index = i
-                                break
-
-                        for i, msg in enumerate(messages):
-                            # 保留原始caption，只在第一个有内容的caption后面添加标记
-                            original_caption = msg.caption
-
-                            if i == first_caption_index and original_caption:
-                                # 第一个有内容的caption：添加标记和序号
-                                caption = f"{original_caption}     {suffix}"
-                            elif original_caption:
-                                # 其他有内容的caption：保留原始
-                                caption = original_caption
-                            else:
-                                # caption为None：跳过（设为None）
-                                caption = None
+                            # 保留原始caption
+                            caption = msg.caption
 
                             # 只处理支持的媒体类型
                             if msg.photo:
@@ -636,7 +602,7 @@ class BotHandler:
 
                         if media_list:
                             await self.bot.send_media_group(target_user_id, media_list)
-                            logger.info(f"✅ Sent media group with {len(media_list)} items to {target_user_id} ({suffix})")
+                            logger.info(f"✅ Sent media group with {len(media_list)} items to {target_user_id}")
                             sent_to_user = True
                         else:
                             logger.warning(f"[Bot {self.bot_id}] 媒体组中所有消息都是不支持的类型，跳过用户 {target_user_id}")
@@ -644,36 +610,35 @@ class BotHandler:
                         # 单条消息
                         message = messages[0]
                         text_content = message.text or message.caption or ""
-                        final_text = f"{text_content}     {suffix}" if text_content else suffix
 
                         if message.text:
-                            await self.bot.send_message(target_user_id, final_text)
+                            await self.bot.send_message(target_user_id, text_content)
                             sent_to_user = True
                         elif message.photo:
                             await self.bot.send_photo(
                                 target_user_id,
                                 message.photo[-1].file_id,
-                                caption=final_text,
+                                caption=text_content,
                             )
                             sent_to_user = True
                         elif message.video:
                             await self.bot.send_video(
-                                target_user_id, message.video.file_id, caption=final_text
+                                target_user_id, message.video.file_id, caption=text_content
                             )
                             sent_to_user = True
                         elif message.document:
                             await self.bot.send_document(
-                                target_user_id, message.document.file_id, caption=final_text
+                                target_user_id, message.document.file_id, caption=text_content
                             )
                             sent_to_user = True
                         elif message.voice:
                             await self.bot.send_voice(
-                                target_user_id, message.voice.file_id, caption=final_text
+                                target_user_id, message.voice.file_id, caption=text_content
                             )
                             sent_to_user = True
                         elif message.audio:
                             await self.bot.send_audio(
-                                target_user_id, message.audio.file_id, caption=final_text
+                                target_user_id, message.audio.file_id, caption=text_content
                             )
                             sent_to_user = True
                         else:
@@ -683,12 +648,12 @@ class BotHandler:
                     # 只有实际发送了消息才记录日志
                     if sent_to_user:
                         actually_sent = True
-                        
+
                         # Determine message type and file_id for logging
                         msg_type = "text"
                         file_id = None
-                        content = final_text if not is_media_group else (caption if caption else None)
-                        
+                        content = text_content if not is_media_group else (caption if caption else None)
+
                         if is_media_group:
                              # Log the first media item's type or generic "media_group"
                              # Actually we are logging one entry per user per forward event (group of messages or single)
@@ -707,12 +672,12 @@ class BotHandler:
                             elif msg.voice: msg_type = "voice"; file_id = msg.voice.file_id
                             elif msg.audio: msg_type = "audio"; file_id = msg.audio.file_id
                             elif msg.text: msg_type = "text"; content = msg.text
-                        
+
                         log = MessageLog(
-                            user_tag=relay.tag or "",
+                            user_tag="",
                             recipient_id=target_user_id,
                             group_id=group.group_id,
-                            assigned_index=idx,
+                            assigned_index=0,
                             original_sender_name=first_message.from_user.full_name,
                             direction=direction,
                             message_type=msg_type,

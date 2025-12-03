@@ -1,22 +1,21 @@
-import asyncio
+import logging
 import logging
 import os
 from contextlib import asynccontextmanager
-from typing import List
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from dotenv import load_dotenv
-from fastapi import FastAPI, Request, Form, Depends
+from fastapi import FastAPI, Request, Depends
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import select, func, desc, update
+from sqlalchemy import select, func, desc
 from sqlalchemy.orm import selectinload
 
 from app.bot_manager import bot_manager
 from app.database import init_db, get_db, AsyncSessionLocal
-from app.models import TargetUser, RelayGroup, MessageLog, BotInstance, GroupUserRelay, MediaFile
+from app.models import TargetUser, RelayGroup, MessageLog, BotInstance, GroupUserRelay
 
 logger = logging.getLogger(__name__)
 
@@ -29,16 +28,6 @@ scheduler = AsyncIOScheduler(timezone="Asia/Shanghai")
 from datetime import datetime, timedelta
 
 # ... imports ...
-
-async def reset_user_indexes():
-    """重置所有用户的消息序号"""
-    async with AsyncSessionLocal() as session:
-        await session.execute(
-            update(GroupUserRelay).values(current_index=0)
-        )
-        await session.commit()
-        logger.info("🔄 已重置所有群组-用户关联的消息序号为 0")
-
 
 async def delete_old_logs():
     """删除 15 天前的日志"""
@@ -154,16 +143,6 @@ async def lifespan(app: FastAPI):
     # 加载并启动所有 bots
     await bot_manager.load_bots_from_db()
 
-    # 配置定时任务：每天重置序号
-    reset_time = os.getenv("RESET_TIME", "16:00")  # 默认早上8点 由于时区问题 16:00 对应北京时间 08:00
-    hour, minute = reset_time.split(":")
-    scheduler.add_job(
-        reset_user_indexes,
-        CronTrigger(hour=int(hour), minute=int(minute)),
-        id="reset_indexes",
-        name="重置用户消息序号"
-    )
-    
     # 定时清理日志（每天凌晨4点）
     scheduler.add_job(
         delete_old_logs,
@@ -171,9 +150,9 @@ async def lifespan(app: FastAPI):
         id="delete_old_logs",
         name="清理过期日志"
     )
-    
+
     scheduler.start()
-    logger.info(f"⏰ 定时任务已启动：每天 {reset_time} (美国时间) 重置序号")
+    logger.info("⏰ 定时任务已启动：每天凌晨4点清理过期日志")
 
     yield
 
@@ -328,7 +307,7 @@ async def group_config_page(request: Request, group_id: int, db=Depends(get_db))
 async def group_config_save(
     request: Request, group_id: int, db=Depends(get_db)
 ):
-    """保存群组的用户配置（包括标记）"""
+    """保存群组的用户配置"""
     # 获取表单数据
     form_data = await request.form()
 
@@ -349,18 +328,16 @@ async def group_config_save(
         await db.delete(relay)
 
     # 创建新的关联
-    # 表单数据格式: user_{user_id}=on, tag_{user_id}=标记值
+    # 表单数据格式: user_{user_id}=on
     for key in form_data.keys():
         if key.startswith("user_"):
             user_id = int(key.replace("user_", ""))
-            tag_key = f"tag_{user_id}"
-            tag = form_data.get(tag_key, "").strip() or None
 
             # 创建新的关联
             new_relay = GroupUserRelay(
                 group_id=group_id,
                 user_id=user_id,
-                tag=tag,
+                tag=None,
                 current_index=0
             )
             db.add(new_relay)
