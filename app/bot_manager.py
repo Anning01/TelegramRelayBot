@@ -16,7 +16,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
 
 from app.database import AsyncSessionLocal
-from app.models import TargetUser, RelayGroup, MessageLog, BotInstance, GroupUserRelay, MediaFile
+from app.models import TargetUser, RelayGroup, MessageLog, BotInstance, GroupUserRelay, MediaFile, GroupGroupRelay
 
 # Configure logging
 logging.basicConfig(
@@ -538,34 +538,221 @@ class BotHandler:
             # 2. 获取该群组配置的目标用户（通过关联表）
             active_relays = [relay for relay in group.user_relays if relay.target_user.is_active]
 
-            if not active_relays:
-                logger.info(f"No active target users configured for group {chat_title}")
-                return
-
             # 3. 转发消息
             is_media_group = len(messages) > 1
-
-            logger.info(f"[Bot {self.bot_id}] Forwarding to {len(active_relays)} users, is_media_group={is_media_group}")
 
             # 追踪是否实际发送了消息
             actually_sent = False
 
-            for relay in active_relays:
-                target_user_id = relay.target_user.user_id
-                sent_to_user = False  # 追踪是否给这个用户发送了消息
+            # 转发到目标用户
+            if active_relays:
+                logger.info(f"[Bot {self.bot_id}] Forwarding to {len(active_relays)} users, is_media_group={is_media_group}")
 
+                for relay in active_relays:
+                    target_user_id = relay.target_user.user_id
+                    sent_to_user = False  # 追踪是否给这个用户发送了消息
+
+                    try:
+                        if is_media_group:
+                            # 媒体组：发送多个媒体
+                            media_list = []
+
+                            for i, msg in enumerate(messages):
+                                # 保留原始caption
+                                caption = msg.caption
+
+                                # 只处理支持的媒体类型
+                                if msg.photo:
+                                    media_list.append(
+                                        InputMediaPhoto(
+                                            media=msg.photo[-1].file_id,
+                                            caption=caption,
+                                            parse_mode=ParseMode.HTML,
+                                        )
+                                    )
+                                elif msg.video:
+                                    media_list.append(
+                                        InputMediaVideo(
+                                            media=msg.video.file_id,
+                                            caption=caption,
+                                            parse_mode=ParseMode.HTML,
+                                        )
+                                    )
+                                elif msg.document:
+                                    media_list.append(
+                                        InputMediaDocument(
+                                            media=msg.document.file_id,
+                                            caption=caption,
+                                            parse_mode=ParseMode.HTML,
+                                        )
+                                    )
+                                elif msg.audio:
+                                    media_list.append(
+                                        InputMediaAudio(
+                                            media=msg.audio.file_id,
+                                            caption=caption,
+                                            parse_mode=ParseMode.HTML,
+                                        )
+                                    )
+                                else:
+                                    # 跳过不支持的消息类型
+                                    logger.warning(f"[Bot {self.bot_id}] 跳过不支持的媒体类型 for user {target_user_id}")
+
+                            if media_list:
+                                await self.bot.send_media_group(target_user_id, media_list)
+                                logger.info(f"✅ Sent media group with {len(media_list)} items to {target_user_id}")
+                                sent_to_user = True
+                            else:
+                                logger.warning(f"[Bot {self.bot_id}] 媒体组中所有消息都是不支持的类型，跳过用户 {target_user_id}")
+                        else:
+                            # 单条消息
+                            message = messages[0]
+                            text_content = message.text or message.caption or ""
+
+                            if message.text:
+                                await self.bot.send_message(target_user_id, text_content)
+                                sent_to_user = True
+                            elif message.photo:
+                                await self.bot.send_photo(
+                                    target_user_id,
+                                    message.photo[-1].file_id,
+                                    caption=text_content,
+                                )
+                                sent_to_user = True
+                            elif message.video:
+                                await self.bot.send_video(
+                                    target_user_id, message.video.file_id, caption=text_content
+                                )
+                                sent_to_user = True
+                            elif message.document:
+                                await self.bot.send_document(
+                                    target_user_id, message.document.file_id, caption=text_content
+                                )
+                                sent_to_user = True
+                            elif message.voice:
+                                await self.bot.send_voice(
+                                    target_user_id, message.voice.file_id, caption=text_content
+                                )
+                                sent_to_user = True
+                            elif message.audio:
+                                await self.bot.send_audio(
+                                    target_user_id, message.audio.file_id, caption=text_content
+                                )
+                                sent_to_user = True
+                            else:
+                                # 跳过不支持的媒体类型，不发送任何消息
+                                logger.warning(f"[Bot {self.bot_id}] 跳过不支持的媒体类型 for user {target_user_id}")
+
+                        # 只有实际发送了消息才记录日志
+                        if sent_to_user:
+                            actually_sent = True
+
+                            # Determine message type and file_id for logging
+                            msg_type = "text"
+                            file_id = None
+                            content = text_content if not is_media_group else (caption if caption else None)
+
+                            if is_media_group:
+                                # Log the first media item's type or generic "media_group"
+                                # Actually we are logging one entry per user per forward event (group of messages or single)
+                                # But here we loop active_relays. Inside, we sent a media group or single message.
+                                # Let's pick the type from the first message if media group
+                                first = messages[0]
+                                if first.photo: msg_type = "photo"; file_id = first.photo[-1].file_id
+                                elif first.video: msg_type = "video"; file_id = first.video.file_id
+                                elif first.document: msg_type = "document"; file_id = first.document.file_id
+                                elif first.audio: msg_type = "audio"; file_id = first.audio.file_id
+                            else:
+                                msg = messages[0]
+                                if msg.photo: msg_type = "photo"; file_id = msg.photo[-1].file_id
+                                elif msg.video: msg_type = "video"; file_id = msg.video.file_id
+                                elif msg.document: msg_type = "document"; file_id = msg.document.file_id
+                                elif msg.voice: msg_type = "voice"; file_id = msg.voice.file_id
+                                elif msg.audio: msg_type = "audio"; file_id = msg.audio.file_id
+                                elif msg.text: msg_type = "text"; content = msg.text
+
+                            log = MessageLog(
+                                user_tag="",
+                                recipient_id=target_user_id,
+                                group_id=group.group_id,
+                                assigned_index=0,
+                                original_sender_name=first_message.from_user.full_name,
+                                direction=direction,
+                                message_type=msg_type,
+                                content=content,
+                                file_id=file_id
+                            )
+                            session.add(log)
+                            await session.flush()  # 获取 log.id
+
+                            # 为每个媒体文件创建 MediaFile 记录并下载
+                            for msg in messages:
+                                media_file_type = None
+                                media_file_id = None
+                                media_caption = msg.caption
+
+                                if msg.photo:
+                                    media_file_type = "photo"
+                                    media_file_id = msg.photo[-1].file_id
+                                elif msg.video:
+                                    media_file_type = "video"
+                                    media_file_id = msg.video.file_id
+                                elif msg.document:
+                                    media_file_type = "document"
+                                    media_file_id = msg.document.file_id
+                                elif msg.audio:
+                                    media_file_type = "audio"
+                                    media_file_id = msg.audio.file_id
+                                elif msg.voice:
+                                    media_file_type = "voice"
+                                    media_file_id = msg.voice.file_id
+
+                                if media_file_type and media_file_id:
+                                    # 下载文件
+                                    local_path = await self._download_media_file(media_file_id, media_file_type)
+
+                                    media_file = MediaFile(
+                                        message_log_id=log.id,
+                                        file_id=media_file_id,
+                                        file_type=media_file_type,
+                                        caption=media_caption,
+                                        local_path=local_path
+                                    )
+                                    session.add(media_file)
+
+                    except Exception as e:
+                        logger.error(f"Failed to send to {target_user_id}: {e}")
+
+            # 消息已在 process_single_message/process_media_group 中点赞过了
+            # 不需要重复点赞
+            if active_relays:
+                if actually_sent:
+                    logger.info(f"✅ [Bot {self.bot_id}] 成功转发消息到 {len(active_relays)} 个用户")
+                else:
+                    logger.warning(f"⚠️ [Bot {self.bot_id}] 没有发送任何消息（可能都是不支持的媒体类型）")
+
+            # ========== 新增：转发到目标群组 ==========
+            target_group_relays = await session.execute(
+                select(GroupGroupRelay)
+                .options(selectinload(GroupGroupRelay.target_group))
+                .where(GroupGroupRelay.source_group_id == group.group_id)
+            )
+            target_relays = target_group_relays.scalars().all()
+
+            for relay in target_relays:
+                target_group = relay.target_group
+                if not target_group.is_active:
+                    continue
+
+                target_group_id = target_group.group_id
                 try:
                     if is_media_group:
-                        # 媒体组：发送多个媒体
-                        media_list = []
-
+                        # 媒体组：构建媒体列表并发送
+                        group_media_list = []
                         for i, msg in enumerate(messages):
-                            # 保留原始caption
                             caption = msg.caption
-
-                            # 只处理支持的媒体类型
                             if msg.photo:
-                                media_list.append(
+                                group_media_list.append(
                                     InputMediaPhoto(
                                         media=msg.photo[-1].file_id,
                                         caption=caption,
@@ -573,7 +760,7 @@ class BotHandler:
                                     )
                                 )
                             elif msg.video:
-                                media_list.append(
+                                group_media_list.append(
                                     InputMediaVideo(
                                         media=msg.video.file_id,
                                         caption=caption,
@@ -581,7 +768,7 @@ class BotHandler:
                                     )
                                 )
                             elif msg.document:
-                                media_list.append(
+                                group_media_list.append(
                                     InputMediaDocument(
                                         media=msg.document.file_id,
                                         caption=caption,
@@ -589,148 +776,84 @@ class BotHandler:
                                     )
                                 )
                             elif msg.audio:
-                                media_list.append(
+                                group_media_list.append(
                                     InputMediaAudio(
                                         media=msg.audio.file_id,
                                         caption=caption,
                                         parse_mode=ParseMode.HTML,
                                     )
                                 )
-                            else:
-                                # 跳过不支持的消息类型
-                                logger.warning(f"[Bot {self.bot_id}] 跳过不支持的媒体类型 for user {target_user_id}")
 
-                        if media_list:
-                            await self.bot.send_media_group(target_user_id, media_list)
-                            logger.info(f"✅ Sent media group with {len(media_list)} items to {target_user_id}")
-                            sent_to_user = True
-                        else:
-                            logger.warning(f"[Bot {self.bot_id}] 媒体组中所有消息都是不支持的类型，跳过用户 {target_user_id}")
+                        if group_media_list:
+                            await self.bot.send_media_group(target_group_id, group_media_list)
+                            logger.info(f"✅ [Bot {self.bot_id}] Forwarded media group to group {target_group.title}")
                     else:
                         # 单条消息
                         message = messages[0]
                         text_content = message.text or message.caption or ""
 
                         if message.text:
-                            await self.bot.send_message(target_user_id, text_content)
-                            sent_to_user = True
+                            await self.bot.send_message(target_group_id, text_content)
                         elif message.photo:
                             await self.bot.send_photo(
-                                target_user_id,
+                                target_group_id,
                                 message.photo[-1].file_id,
                                 caption=text_content,
                             )
-                            sent_to_user = True
                         elif message.video:
                             await self.bot.send_video(
-                                target_user_id, message.video.file_id, caption=text_content
+                                target_group_id, message.video.file_id, caption=text_content
                             )
-                            sent_to_user = True
                         elif message.document:
                             await self.bot.send_document(
-                                target_user_id, message.document.file_id, caption=text_content
+                                target_group_id, message.document.file_id, caption=text_content
                             )
-                            sent_to_user = True
                         elif message.voice:
                             await self.bot.send_voice(
-                                target_user_id, message.voice.file_id, caption=text_content
+                                target_group_id, message.voice.file_id, caption=text_content
                             )
-                            sent_to_user = True
                         elif message.audio:
                             await self.bot.send_audio(
-                                target_user_id, message.audio.file_id, caption=text_content
+                                target_group_id, message.audio.file_id, caption=text_content
                             )
-                            sent_to_user = True
-                        else:
-                            # 跳过不支持的媒体类型，不发送任何消息
-                            logger.warning(f"[Bot {self.bot_id}] 跳过不支持的媒体类型 for user {target_user_id}")
 
-                    # 只有实际发送了消息才记录日志
-                    if sent_to_user:
-                        actually_sent = True
+                        logger.info(f"✅ [Bot {self.bot_id}] Forwarded message to group {target_group.title}")
 
-                        # Determine message type and file_id for logging
-                        msg_type = "text"
-                        file_id = None
-                        content = text_content if not is_media_group else (caption if caption else None)
+                    # 记录群组转发日志
+                    msg_type = "text"
+                    file_id = None
+                    content = None
+                    if is_media_group:
+                        first = messages[0]
+                        content = first.caption
+                        if first.photo: msg_type = "photo"; file_id = first.photo[-1].file_id
+                        elif first.video: msg_type = "video"; file_id = first.video.file_id
+                        elif first.document: msg_type = "document"; file_id = first.document.file_id
+                        elif first.audio: msg_type = "audio"; file_id = first.audio.file_id
+                    else:
+                        msg = messages[0]
+                        content = msg.text or msg.caption
+                        if msg.photo: msg_type = "photo"; file_id = msg.photo[-1].file_id
+                        elif msg.video: msg_type = "video"; file_id = msg.video.file_id
+                        elif msg.document: msg_type = "document"; file_id = msg.document.file_id
+                        elif msg.voice: msg_type = "voice"; file_id = msg.voice.file_id
+                        elif msg.audio: msg_type = "audio"; file_id = msg.audio.file_id
 
-                        if is_media_group:
-                             # Log the first media item's type or generic "media_group"
-                             # Actually we are logging one entry per user per forward event (group of messages or single)
-                             # But here we loop active_relays. Inside, we sent a media group or single message.
-                             # Let's pick the type from the first message if media group
-                             first = messages[0]
-                             if first.photo: msg_type = "photo"; file_id = first.photo[-1].file_id
-                             elif first.video: msg_type = "video"; file_id = first.video.file_id
-                             elif first.document: msg_type = "document"; file_id = first.document.file_id
-                             elif first.audio: msg_type = "audio"; file_id = first.audio.file_id
-                        else:
-                            msg = messages[0]
-                            if msg.photo: msg_type = "photo"; file_id = msg.photo[-1].file_id
-                            elif msg.video: msg_type = "video"; file_id = msg.video.file_id
-                            elif msg.document: msg_type = "document"; file_id = msg.document.file_id
-                            elif msg.voice: msg_type = "voice"; file_id = msg.voice.file_id
-                            elif msg.audio: msg_type = "audio"; file_id = msg.audio.file_id
-                            elif msg.text: msg_type = "text"; content = msg.text
-
-                        log = MessageLog(
-                            user_tag="",
-                            recipient_id=target_user_id,
-                            group_id=group.group_id,
-                            assigned_index=0,
-                            original_sender_name=first_message.from_user.full_name,
-                            direction=direction,
-                            message_type=msg_type,
-                            content=content,
-                            file_id=file_id
-                        )
-                        session.add(log)
-                        await session.flush()  # 获取 log.id
-
-                        # 为每个媒体文件创建 MediaFile 记录并下载
-                        for msg in messages:
-                            media_file_type = None
-                            media_file_id = None
-                            media_caption = msg.caption
-
-                            if msg.photo:
-                                media_file_type = "photo"
-                                media_file_id = msg.photo[-1].file_id
-                            elif msg.video:
-                                media_file_type = "video"
-                                media_file_id = msg.video.file_id
-                            elif msg.document:
-                                media_file_type = "document"
-                                media_file_id = msg.document.file_id
-                            elif msg.audio:
-                                media_file_type = "audio"
-                                media_file_id = msg.audio.file_id
-                            elif msg.voice:
-                                media_file_type = "voice"
-                                media_file_id = msg.voice.file_id
-
-                            if media_file_type and media_file_id:
-                                # 下载文件
-                                local_path = await self._download_media_file(media_file_id, media_file_type)
-
-                                media_file = MediaFile(
-                                    message_log_id=log.id,
-                                    file_id=media_file_id,
-                                    file_type=media_file_type,
-                                    caption=media_caption,
-                                    local_path=local_path
-                                )
-                                session.add(media_file)
+                    log = MessageLog(
+                        user_tag=f"→{target_group.title[:10]}",  # 标记为目标群组
+                        recipient_id=target_group_id,
+                        group_id=group.group_id,
+                        assigned_index=0,
+                        original_sender_name=first_message.from_user.full_name,
+                        direction="group_relay",  # 群组转发
+                        message_type=msg_type,
+                        content=content,
+                        file_id=file_id
+                    )
+                    session.add(log)
 
                 except Exception as e:
-                    logger.error(f"Failed to send to {target_user_id}: {e}")
-
-            # 消息已在 process_single_message/process_media_group 中点赞过了
-            # 不需要重复点赞
-            if actually_sent:
-                logger.info(f"✅ [Bot {self.bot_id}] 成功转发消息到 {len(active_relays)} 个用户")
-            else:
-                logger.warning(f"⚠️ [Bot {self.bot_id}] 没有发送任何消息（可能都是不支持的媒体类型）")
+                    logger.error(f"Failed to forward to group {target_group_id}: {e}")
 
             await session.commit()
 

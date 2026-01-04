@@ -25,7 +25,7 @@ def main():
     parser.add_argument(
         "--port",
         type=int,
-        default=8000,  # 指定默认端口
+        default=8001,  # 指定默认端口
         help="服务监听的端口号，默认值为 8000"
     )
 

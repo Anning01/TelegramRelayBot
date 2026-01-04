@@ -18,7 +18,7 @@ from typing import Optional
 
 from app.bot_manager import bot_manager
 from app.database import init_db, get_db, AsyncSessionLocal
-from app.models import TargetUser, RelayGroup, MessageLog, BotInstance, GroupUserRelay
+from app.models import TargetUser, RelayGroup, MessageLog, BotInstance, GroupUserRelay, GroupGroupRelay
 
 logger = logging.getLogger(__name__)
 
@@ -295,6 +295,22 @@ async def group_config_page(request: Request, group_id: int, db=Depends(get_db))
     # 构建用户配置字典 {user_id: tag}
     user_configs = {relay.user_id: relay.tag for relay in group.user_relays}
 
+    # 获取同一 Bot 下的其他群组（排除自身）
+    all_groups = (await db.execute(
+        select(RelayGroup).where(
+            RelayGroup.bot_id == group.bot_id,
+            RelayGroup.group_id != group_id
+        )
+    )).scalars().all()
+
+    # 获取已配置的目标群组
+    target_group_ids = set(
+        r.target_group_id for r in
+        (await db.execute(
+            select(GroupGroupRelay).where(GroupGroupRelay.source_group_id == group_id)
+        )).scalars().all()
+    )
+
     return templates.TemplateResponse(
         "group_config.html",
         {
@@ -302,6 +318,8 @@ async def group_config_page(request: Request, group_id: int, db=Depends(get_db))
             "group": group,
             "all_users": all_users,
             "user_configs": user_configs,
+            "all_groups": all_groups,
+            "target_group_ids": target_group_ids,
         },
     )
 
@@ -310,7 +328,7 @@ async def group_config_page(request: Request, group_id: int, db=Depends(get_db))
 async def group_config_save(
     request: Request, group_id: int, db=Depends(get_db)
 ):
-    """保存群组的用户配置"""
+    """保存群组的用户和群组转发配置"""
     # 获取表单数据
     form_data = await request.form()
 
@@ -319,7 +337,7 @@ async def group_config_save(
     if not group:
         return RedirectResponse(url="/", status_code=303)
 
-    # 删除现有的所有关联
+    # 删除现有的用户关联
     await db.execute(
         select(GroupUserRelay).where(GroupUserRelay.group_id == group_id)
     )
@@ -330,18 +348,31 @@ async def group_config_save(
     for relay in existing_relays:
         await db.delete(relay)
 
+    # 删除现有的群组关联
+    existing_group_relays = (await db.execute(
+        select(GroupGroupRelay).where(GroupGroupRelay.source_group_id == group_id)
+    )).scalars().all()
+    for relay in existing_group_relays:
+        await db.delete(relay)
+
     # 创建新的关联
-    # 表单数据格式: user_{user_id}=on
     for key in form_data.keys():
+        # 用户关联: user_{user_id}=on
         if key.startswith("user_"):
             user_id = int(key.replace("user_", ""))
-
-            # 创建新的关联
             new_relay = GroupUserRelay(
                 group_id=group_id,
                 user_id=user_id,
                 tag=None,
                 current_index=0
+            )
+            db.add(new_relay)
+        # 群组关联: group_{group_id}=on
+        elif key.startswith("group_"):
+            target_gid = int(key.replace("group_", ""))
+            new_relay = GroupGroupRelay(
+                source_group_id=group_id,
+                target_group_id=target_gid
             )
             db.add(new_relay)
 

@@ -27,6 +27,18 @@ class GroupUserRelay(Base):
     target_user = relationship("TargetUser", back_populates="group_relays")
 
 
+class GroupGroupRelay(Base):
+    """群组-群组关联表：源群组转发到目标群组"""
+    __tablename__ = "group_group_relay"
+
+    source_group_id = Column(BigInteger, ForeignKey("relay_groups.group_id"), primary_key=True)
+    target_group_id = Column(BigInteger, ForeignKey("relay_groups.group_id"), primary_key=True)
+
+    # 关联
+    source_group = relationship("RelayGroup", foreign_keys=[source_group_id], backref="target_group_relays")
+    target_group = relationship("RelayGroup", foreign_keys=[target_group_id])
+
+
 class BotInstance(Base):
     """Bot 实例表：存储多个 bot 的配置信息"""
     __tablename__ = "bot_instances"
