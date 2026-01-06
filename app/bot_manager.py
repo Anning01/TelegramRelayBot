@@ -33,6 +33,7 @@ class BotHandler:
         self.bot_id = bot_id
         self.bot = bot
         self.dp = dp
+        self.bot_user_id = None  # 缓存 Bot 的 user_id，防止死循环
 
         # 群组媒体组缓存：{media_group_id: [messages]}
         self.media_groups = defaultdict(list)
@@ -220,6 +221,14 @@ class BotHandler:
         """处理群组消息"""
 
         if not message.from_user:
+            return
+
+        # 防止死循环：忽略 Bot 自身发送的消息
+        if self.bot_user_id is None:
+            bot_info = await self.bot.get_me()
+            self.bot_user_id = bot_info.id
+        if message.from_user.id == self.bot_user_id:
+            logger.debug(f"[Bot {self.bot_id}] 忽略 Bot 自身发送的消息")
             return
 
         chat_id = message.chat.id
