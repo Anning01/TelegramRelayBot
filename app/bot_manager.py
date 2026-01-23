@@ -176,8 +176,9 @@ class BotHandler:
             for relay in active_relays:
                 try:
                     group_id = relay.group_id
+                    forwarded = False
 
-                    # 转发到群组（不加序号，不保存数据库）
+                    # 转发到群组
                     if is_media_group:
                         # 媒体组：保持原始caption
                         media_list = []
@@ -196,6 +197,7 @@ class BotHandler:
                         if media_list:
                             await self.bot.send_media_group(group_id, media_list)
                             logger.info(f"✅ User reply: Forwarded media group ({len(media_list)} items) to group {group_id}")
+                            forwarded = True
                     else:
                         # 单条消息：保持原始caption
                         msg = messages[0]
@@ -203,19 +205,100 @@ class BotHandler:
 
                         if msg.photo:
                             await self.bot.send_photo(group_id, msg.photo[-1].file_id, caption=caption)
+                            forwarded = True
                         elif msg.video:
                             await self.bot.send_video(group_id, msg.video.file_id, caption=caption)
+                            forwarded = True
                         elif msg.document:
                             await self.bot.send_document(group_id, msg.document.file_id, caption=caption)
+                            forwarded = True
                         elif msg.audio:
                             await self.bot.send_audio(group_id, msg.audio.file_id, caption=caption)
+                            forwarded = True
                         elif msg.voice:
                             await self.bot.send_voice(group_id, msg.voice.file_id, caption=caption)
+                            forwarded = True
 
-                        logger.info(f"✅ User reply: Forwarded single message to group {group_id}")
+                        if forwarded:
+                            logger.info(f"✅ User reply: Forwarded single message to group {group_id}")
+
+                    # 保存日志（包含媒体文件）
+                    if forwarded:
+                        # 确定消息类型和内容
+                        msg_type = "text"
+                        file_id = None
+                        content = first_message.caption or first_message.text or ""
+
+                        first_msg = messages[0]
+                        if first_msg.photo:
+                            msg_type = "photo"
+                            file_id = first_msg.photo[-1].file_id
+                        elif first_msg.video:
+                            msg_type = "video"
+                            file_id = first_msg.video.file_id
+                        elif first_msg.document:
+                            msg_type = "document"
+                            file_id = first_msg.document.file_id
+                        elif first_msg.audio:
+                            msg_type = "audio"
+                            file_id = first_msg.audio.file_id
+                        elif first_msg.voice:
+                            msg_type = "voice"
+                            file_id = first_msg.voice.file_id
+
+                        # 创建 MessageLog 记录
+                        log = MessageLog(
+                            user_tag=relay.tag or "",
+                            recipient_id=user_id,
+                            group_id=group_id,
+                            assigned_index=0,
+                            original_sender_name=first_message.from_user.full_name if first_message.from_user else "Unknown",
+                            direction="inbound",
+                            message_type=msg_type,
+                            content=content,
+                            file_id=file_id
+                        )
+                        session.add(log)
+                        await session.flush()
+
+                        # 为每个媒体文件创建 MediaFile 记录
+                        for msg in messages:
+                            media_file_type = None
+                            media_file_id = None
+                            media_caption = msg.caption
+
+                            if msg.photo:
+                                media_file_type = "photo"
+                                media_file_id = msg.photo[-1].file_id
+                            elif msg.video:
+                                media_file_type = "video"
+                                media_file_id = msg.video.file_id
+                            elif msg.document:
+                                media_file_type = "document"
+                                media_file_id = msg.document.file_id
+                            elif msg.audio:
+                                media_file_type = "audio"
+                                media_file_id = msg.audio.file_id
+                            elif msg.voice:
+                                media_file_type = "voice"
+                                media_file_id = msg.voice.file_id
+
+                            if media_file_type and media_file_id:
+                                local_path = await self._download_media_file(media_file_id, media_file_type)
+
+                                media_file = MediaFile(
+                                    message_log_id=log.id,
+                                    file_id=media_file_id,
+                                    file_type=media_file_type,
+                                    local_path=local_path,
+                                    caption=media_caption
+                                )
+                                session.add(media_file)
 
                 except Exception as e:
                     logger.error(f"Failed to forward user reply to group {relay.group_id}: {e}")
+
+            await session.commit()
 
     async def handle_group_msg(self, message: types.Message):
         """处理群组消息"""
